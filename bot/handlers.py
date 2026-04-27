@@ -314,46 +314,66 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             log.warning("edit_text failed: %s", e)
 
     async def _show_services(target: Message, state: FSMContext, page: int, prefix: str, edit: bool = False) -> None:
+        # Show loading hint only on first cold fetch (cache empty)
+        cold = api._cache_get("services::1:200") is None  # noqa: SLF001
+        if cold and edit:
+            await _safe_edit(target, "⏳ Загружаю сервисы…")
+        elif cold:
+            target = await target.answer("⏳ Загружаю сервисы… (gotsms бывает долго отвечает)")
+            edit = True
+
         try:
-            services, meta = await api.services(page=page, per_page=SERVICES_PER_PAGE)
+            all_services = await api.services_all(per_page=200)
         except GotSmsError as e:
             await target.answer(f"Ошибка API {e.status}")
             return
-        has_next = meta.get("current_page", page) < meta.get("last_page", page)
-        text = "Выбери сервис:"
-        kb = services_kb(services, page=page, has_next=has_next, prefix=prefix)
+
+        total = len(all_services)
+        start = (page - 1) * SERVICES_PER_PAGE
+        end = start + SERVICES_PER_PAGE
+        chunk = all_services[start:end]
+        has_next = end < total
+        text = f"Выбери сервис ({total} шт.):"
+        kb = services_kb(chunk, page=page, has_next=has_next, prefix=prefix)
         if edit:
             await _safe_edit(target, text, reply_markup=kb)
         else:
             await target.answer(text, reply_markup=kb)
 
     async def _show_plans(target: Message, state: FSMContext, service_id: str, page: int, prefix: str, edit: bool = False) -> None:
+        cold = api._cache_get(f"plans:{service_id}::::1:200") is None  # noqa: SLF001
+        if cold and edit:
+            await _safe_edit(target, "⏳ Загружаю планы…")
+        elif cold:
+            target = await target.answer("⏳ Загружаю планы… (gotsms бывает долго отвечает)")
+            edit = True
+
         try:
-            plans, meta = await api.plans(service_id=service_id, page=page, per_page=PLANS_PER_PAGE)
+            all_plans = await api.plans_all(service_id=service_id, per_page=200)
         except GotSmsError as e:
             await target.answer(f"Ошибка API {e.status}")
             return
-        has_next = meta.get("current_page", page) < meta.get("last_page", page)
-        if not plans:
+
+        total = len(all_plans)
+        start = (page - 1) * PLANS_PER_PAGE
+        end = start + PLANS_PER_PAGE
+        chunk = all_plans[start:end]
+        has_next = end < total
+        if total == 0:
             text = "Для этого сервиса нет доступных планов."
         else:
-            text = f"Сервис: <b>{plans[0].service_name}</b>\nВыбери план:"
-        kb = plans_kb(plans, page=page, has_next=has_next, prefix=prefix, service_id=service_id)
+            text = f"Сервис: <b>{all_plans[0].service_name}</b> · {total} планов\nВыбери план:"
+        kb = plans_kb(chunk, page=page, has_next=has_next, prefix=prefix, service_id=service_id)
         if edit:
             await _safe_edit(target, text, reply_markup=kb)
         else:
             await target.answer(text, reply_markup=kb)
 
     async def _find_plan(service_id: str, plan_id: str) -> Plan | None:
-        page = 1
-        while True:
-            plans, meta = await api.plans(service_id=service_id, page=page, per_page=50)
-            for p in plans:
-                if p.id == plan_id:
-                    return p
-            if meta.get("current_page", page) >= meta.get("last_page", page):
-                return None
-            page += 1
+        for p in await api.plans_all(service_id=service_id, per_page=200):
+            if p.id == plan_id:
+                return p
+        return None
 
     return r
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=skupgotsms — gotsms.org auto-buy Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/skupgotsms
+EnvironmentFile=/opt/skupgotsms/.env
+ExecStart=/opt/skupgotsms/.venv/bin/python /opt/skupgotsms/main.py
+Restart=always
+RestartSec=5
+User=skupgotsms
+Group=skupgotsms
+
+[Install]
+WantedBy=multi-user.target

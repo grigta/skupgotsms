@@ -183,11 +183,11 @@ class GotSmsClient:
             self._cache_set(cache_key, result)
             return result
 
-    async def services_all(self, per_page: int = 200) -> list[Service]:
+    async def services_all(self, per_page: int = 100) -> list[Service]:
         items, _ = await self.services(page=1, per_page=per_page)
         return items
 
-    async def services_full(self, per_page: int = 200) -> list[Service]:
+    async def services_full(self, per_page: int = 100) -> list[Service]:
         """All services across pages, sorted by name. Cached as a single bundle."""
         cache_key = f"services_full:{per_page}"
         cached = self._cache_get(cache_key)
@@ -270,7 +270,7 @@ class GotSmsClient:
             self._cache_set(cache_key, result)
             return result
 
-    async def plans_all(self, service_id: str, per_page: int = 200) -> list[Plan]:
+    async def plans_all(self, service_id: str, per_page: int = 100) -> list[Plan]:
         items, _ = await self.plans(service_id=service_id, page=1, per_page=per_page)
         return items
 

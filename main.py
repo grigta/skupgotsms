@@ -27,7 +27,7 @@ async def prewarm(api: GotSmsClient) -> None:
         api.invalidate_cache("services_full:")
         api.invalidate_cache("services:")
         log.info("prewarm: fetching all services across pages…")
-        services = await api.services_full(per_page=200)
+        services = await api.services_full(per_page=100)
         log.info("prewarm: %d services cached", len(services))
     except Exception as e:
         log.warning("prewarm services failed: %s", e)
@@ -37,14 +37,14 @@ async def prewarm(api: GotSmsClient) -> None:
     plan_service_ids = {
         key.split(":")[1]
         for key in list(api._cache.keys())  # noqa: SLF001
-        if key.startswith("plans:") and key.endswith(":1:200")
+        if key.startswith("plans:") and key.endswith(":1:100")
     }
     for svc_id in plan_service_ids:
         if not svc_id:
             continue
         try:
             api.invalidate_cache(f"plans:{svc_id}:")
-            await api.plans_all(service_id=svc_id, per_page=200)
+            await api.plans_all(service_id=svc_id, per_page=100)
         except Exception as e:
             log.warning("prewarm plans for %s failed: %s", svc_id, e)
 

@@ -342,14 +342,14 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
 
     async def _fetch_full_services(target: Message, edit: bool) -> tuple[list, Message, bool] | None:
         """Returns (services, target, edit) — handles loading placeholder and errors."""
-        cold = api._cache_get("services_full:200") is None  # noqa: SLF001
+        cold = api._cache_get("services_full:100") is None  # noqa: SLF001
         if cold and edit:
             await _safe_edit(target, "⏳ Загружаю сервисы…")
         elif cold:
             target = await target.answer("⏳ Загружаю все сервисы… (gotsms долго отвечает, ~20 сек)")
             edit = True
         try:
-            services = await api.services_full(per_page=200)
+            services = await api.services_full(per_page=100)
         except GotSmsError as e:
             await target.answer(f"Ошибка API {e.status}")
             return None
@@ -389,7 +389,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await target.answer(text, reply_markup=kb)
 
     async def _show_plans(target: Message, state: FSMContext, service_id: str, page: int, prefix: str, edit: bool = False) -> None:
-        cold = api._cache_get(f"plans:{service_id}::::1:200") is None  # noqa: SLF001
+        cold = api._cache_get(f"plans:{service_id}::::1:100") is None  # noqa: SLF001
         if cold and edit:
             await _safe_edit(target, "⏳ Загружаю планы…")
         elif cold:
@@ -397,7 +397,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             edit = True
 
         try:
-            all_plans = await api.plans_all(service_id=service_id, per_page=200)
+            all_plans = await api.plans_all(service_id=service_id, per_page=100)
         except GotSmsError as e:
             await target.answer(f"Ошибка API {e.status}")
             return
@@ -418,7 +418,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await target.answer(text, reply_markup=kb)
 
     async def _find_plan(service_id: str, plan_id: str) -> Plan | None:
-        for p in await api.plans_all(service_id=service_id, per_page=200):
+        for p in await api.plans_all(service_id=service_id, per_page=100):
             if p.id == plan_id:
                 return p
         return None

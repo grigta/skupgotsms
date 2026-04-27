@@ -180,6 +180,38 @@ class GotSmsClient:
         items, _ = await self.services(page=1, per_page=per_page)
         return items
 
+    async def services_full(self, per_page: int = 200) -> list[Service]:
+        """All services across pages, sorted by name. Cached as a single bundle."""
+        cache_key = f"services_full:{per_page}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+        async with self._lock_for(cache_key):
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
+            first_items, meta = await self.services(page=1, per_page=per_page)
+            last_page = int(meta.get("last_page", 1) or 1)
+            all_items: list[Service] = list(first_items)
+            if last_page > 1:
+                sem = asyncio.Semaphore(4)
+
+                async def fetch(p: int) -> list[Service]:
+                    async with sem:
+                        its, _ = await self.services(page=p, per_page=per_page)
+                        return its
+
+                results = await asyncio.gather(
+                    *[fetch(p) for p in range(2, last_page + 1)],
+                    return_exceptions=True,
+                )
+                for r in results:
+                    if isinstance(r, list):
+                        all_items.extend(r)
+            all_items.sort(key=lambda s: s.name.lower())
+            self._cache_set(cache_key, all_items)
+            return all_items
+
     async def plans(
         self,
         service_id: str | None = None,

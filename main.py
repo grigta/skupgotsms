@@ -24,8 +24,10 @@ log = logging.getLogger("main")
 async def prewarm(api: GotSmsClient) -> None:
     """Refresh services cache + already-warm plan caches in the background."""
     try:
-        log.info("prewarm: fetching services_all…")
-        services = await api.services_all(per_page=200)
+        api.invalidate_cache("services_full:")
+        api.invalidate_cache("services:")
+        log.info("prewarm: fetching all services across pages…")
+        services = await api.services_full(per_page=200)
         log.info("prewarm: %d services cached", len(services))
     except Exception as e:
         log.warning("prewarm services failed: %s", e)

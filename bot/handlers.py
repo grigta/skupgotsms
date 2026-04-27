@@ -16,6 +16,7 @@ from .keyboards import (
     autobuy_job_kb,
     autobuy_list_kb,
     confirm_buy_kb,
+    letters_kb,
     main_menu,
     plans_kb,
     services_kb,
@@ -101,7 +102,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     async def buy_start(m: Message, state: FSMContext):
         await state.clear()
         await state.update_data(prefix="buy")
-        await _show_services(m, state, page=1, prefix="buy")
+        await _show_letters(m, prefix="buy", edit=False)
 
     # ───────── Autobuy menu ─────────
     @r.message(F.text == "🤖 Автобай")
@@ -120,7 +121,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         await c.answer()
         await state.clear()
         await state.update_data(prefix="ab")
-        await _show_services(c.message, state, page=1, prefix="ab")
+        await _show_letters(c.message, prefix="ab", edit=True)
 
     @r.callback_query(F.data.startswith("ab:open:"))
     async def ab_open(c: CallbackQuery):
@@ -188,11 +189,24 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         await m.answer(_job_text(job), reply_markup=autobuy_job_kb(job))
 
     # ───────── Service / plan flow shared ─────────
-    @r.callback_query(F.data.regexp(r"^(buy|ab):svcpage:(\d+)$"))
+    @r.callback_query(F.data.regexp(r"^(buy|ab):letters$"))
+    async def cb_letters(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        prefix = c.data.split(":")[0]
+        await _show_letters(c.message, prefix=prefix, edit=True)
+
+    @r.callback_query(F.data.regexp(r"^(buy|ab):letter:.+$"))
+    async def cb_letter_pick(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        prefix, _, letter = c.data.split(":", 2)
+        await state.update_data(prefix=prefix, letter=letter)
+        await _show_services_by_letter(c.message, letter=letter, page=1, prefix=prefix, edit=True)
+
+    @r.callback_query(F.data.regexp(r"^(buy|ab):svcpage:[^:]+:\d+$"))
     async def cb_svc_page(c: CallbackQuery, state: FSMContext):
         await c.answer()
-        prefix, _, page_s = c.data.split(":")
-        await _show_services(c.message, state, page=int(page_s), prefix=prefix, edit=True)
+        prefix, _, letter, page_s = c.data.split(":")
+        await _show_services_by_letter(c.message, letter=letter, page=int(page_s), prefix=prefix, edit=True)
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):svc:.+$"))
     async def cb_svc_pick(c: CallbackQuery, state: FSMContext):
@@ -211,7 +225,12 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     async def cb_back_to_svc(c: CallbackQuery, state: FSMContext):
         await c.answer()
         prefix = c.data.split(":")[0]
-        await _show_services(c.message, state, page=1, prefix=prefix, edit=True)
+        data = await state.get_data()
+        letter = data.get("letter")
+        if letter:
+            await _show_services_by_letter(c.message, letter=letter, page=1, prefix=prefix, edit=True)
+        else:
+            await _show_letters(c.message, prefix=prefix, edit=True)
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):cancel$"))
     async def cb_cancel(c: CallbackQuery, state: FSMContext):
@@ -313,28 +332,57 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 return
             log.warning("edit_text failed: %s", e)
 
-    async def _show_services(target: Message, state: FSMContext, page: int, prefix: str, edit: bool = False) -> None:
-        # Show loading hint only on first cold fetch (cache empty)
-        cold = api._cache_get("services::1:200") is None  # noqa: SLF001
+    def _bucket(name: str) -> str:
+        if not name:
+            return "#"
+        ch = name[0].upper()
+        if ch.isalpha() or ch.isdigit():
+            return ch
+        return "#"
+
+    async def _fetch_full_services(target: Message, edit: bool) -> tuple[list, Message, bool] | None:
+        """Returns (services, target, edit) — handles loading placeholder and errors."""
+        cold = api._cache_get("services_full:200") is None  # noqa: SLF001
         if cold and edit:
             await _safe_edit(target, "⏳ Загружаю сервисы…")
         elif cold:
-            target = await target.answer("⏳ Загружаю сервисы… (gotsms бывает долго отвечает)")
+            target = await target.answer("⏳ Загружаю все сервисы… (gotsms долго отвечает, ~20 сек)")
             edit = True
-
         try:
-            all_services = await api.services_all(per_page=200)
+            services = await api.services_full(per_page=200)
         except GotSmsError as e:
             await target.answer(f"Ошибка API {e.status}")
-            return
+            return None
+        return services, target, edit
 
-        total = len(all_services)
+    async def _show_letters(target: Message, prefix: str, edit: bool = False) -> None:
+        result = await _fetch_full_services(target, edit)
+        if result is None:
+            return
+        all_services, target, edit = result
+        counts: dict[str, int] = {}
+        for s in all_services:
+            counts[_bucket(s.name)] = counts.get(_bucket(s.name), 0) + 1
+        text = f"Сервисов: <b>{len(all_services)}</b>. Выбери букву:"
+        kb = letters_kb(counts, prefix=prefix)
+        if edit:
+            await _safe_edit(target, text, reply_markup=kb)
+        else:
+            await target.answer(text, reply_markup=kb)
+
+    async def _show_services_by_letter(target: Message, letter: str, page: int, prefix: str, edit: bool = False) -> None:
+        result = await _fetch_full_services(target, edit)
+        if result is None:
+            return
+        all_services, target, edit = result
+        filtered = [s for s in all_services if _bucket(s.name) == letter]
+        total = len(filtered)
         start = (page - 1) * SERVICES_PER_PAGE
         end = start + SERVICES_PER_PAGE
-        chunk = all_services[start:end]
+        chunk = filtered[start:end]
         has_next = end < total
-        text = f"Выбери сервис ({total} шт.):"
-        kb = services_kb(chunk, page=page, has_next=has_next, prefix=prefix)
+        text = f"<b>{letter}</b> · {total} сервис(ов). Выбери:"
+        kb = services_kb(chunk, page=page, has_next=has_next, prefix=prefix, letter=letter)
         if edit:
             await _safe_edit(target, text, reply_markup=kb)
         else:

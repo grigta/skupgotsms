@@ -17,17 +17,32 @@ def main_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def services_kb(services: list[Service], page: int, has_next: bool, prefix: str) -> InlineKeyboardMarkup:
+def letters_kb(counts: dict[str, int], prefix: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for ch in sorted(counts.keys()):
+        row.append(InlineKeyboardButton(text=f"{ch} · {counts[ch]}", callback_data=f"{prefix}:letter:{ch}"))
+        if len(row) == 5:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data=f"{prefix}:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def services_kb(services: list[Service], page: int, has_next: bool, prefix: str, letter: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for s in services:
         rows.append([InlineKeyboardButton(text=s.name, callback_data=f"{prefix}:svc:{s.id}")])
     nav: list[InlineKeyboardButton] = []
     if page > 1:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"{prefix}:svcpage:{page - 1}"))
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"{prefix}:svcpage:{letter}:{page - 1}"))
     if has_next:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"{prefix}:svcpage:{page + 1}"))
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"{prefix}:svcpage:{letter}:{page + 1}"))
     if nav:
         rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔤 К буквам", callback_data=f"{prefix}:letters")])
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data=f"{prefix}:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

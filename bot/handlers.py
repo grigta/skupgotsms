@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -129,13 +130,13 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         if not job:
             await c.answer("Не найдено", show_alert=True)
             return
-        await c.message.edit_text(_job_text(job), reply_markup=autobuy_job_kb(job))
+        await _safe_edit(c.message, _job_text(job), reply_markup=autobuy_job_kb(job))
 
     @r.callback_query(F.data == "ab:back")
     async def ab_back(c: CallbackQuery):
         await c.answer()
         jobs = await db.list_jobs()
-        await c.message.edit_text("🤖 Автобаи:", reply_markup=autobuy_list_kb(jobs))
+        await _safe_edit(c.message, "🤖 Автобаи:", reply_markup=autobuy_list_kb(jobs))
 
     @r.callback_query(F.data.startswith("ab:toggle:"))
     async def ab_toggle(c: CallbackQuery):
@@ -149,7 +150,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         else:
             await autobuy.enable(job_id)
         job = await db.get_job(job_id)
-        await c.message.edit_text(_job_text(job), reply_markup=autobuy_job_kb(job))
+        await _safe_edit(c.message, _job_text(job), reply_markup=autobuy_job_kb(job))
 
     @r.callback_query(F.data.startswith("ab:del:"))
     async def ab_del(c: CallbackQuery):
@@ -157,7 +158,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         job_id = int(c.data.split(":")[2])
         await autobuy.remove(job_id)
         jobs = await db.list_jobs()
-        await c.message.edit_text("Удалено.\n\n🤖 Автобаи:", reply_markup=autobuy_list_kb(jobs))
+        await _safe_edit(c.message, "Удалено.\n\n🤖 Автобаи:", reply_markup=autobuy_list_kb(jobs))
 
     @r.callback_query(F.data.startswith("ab:interval:"))
     async def ab_interval(c: CallbackQuery, state: FSMContext):
@@ -216,7 +217,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     async def cb_cancel(c: CallbackQuery, state: FSMContext):
         await c.answer()
         await state.clear()
-        await c.message.edit_text("Отменено.")
+        await _safe_edit(c.message, "Отменено.")
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):plan:.+$"))
     async def cb_plan_pick(c: CallbackQuery, state: FSMContext):
@@ -226,11 +227,11 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         svc_id = data.get("service_id")
         plan = await _find_plan(svc_id, plan_id) if svc_id else None
         if not plan:
-            await c.message.edit_text("План не найден, попробуй ещё раз.")
+            await _safe_edit(c.message, "План не найден, попробуй ещё раз.")
             return
 
         if prefix == "buy":
-            await c.message.edit_text(_plan_text(plan), reply_markup=confirm_buy_kb(plan.id))
+            await _safe_edit(c.message, _plan_text(plan), reply_markup=confirm_buy_kb(plan.id))
         else:  # ab
             from config import settings
             job_id = await db.add_job(
@@ -241,7 +242,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             )
             await autobuy.enable(job_id)
             job = await db.get_job(job_id)
-            await c.message.edit_text(
+            await _safe_edit(c.message, 
                 f"🤖 Автобай создан и запущен.\n\n{_job_text(job)}",
                 reply_markup=autobuy_job_kb(job),
             )
@@ -255,15 +256,15 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         try:
             rent = await api.create_rent(plan_id)
         except NoNumbersAvailable:
-            await c.message.edit_text("😕 Свободных номеров сейчас нет, попробуй позже.")
+            await _safe_edit(c.message, "😕 Свободных номеров сейчас нет, попробуй позже.")
             return
         except InsufficientFunds:
-            await c.message.edit_text("💸 Недостаточно средств.")
+            await _safe_edit(c.message, "💸 Недостаточно средств.")
             return
         except GotSmsError as e:
-            await c.message.edit_text(f"Ошибка {e.status}: <code>{e.payload}</code>")
+            await _safe_edit(c.message, f"Ошибка {e.status}: <code>{e.payload}</code>")
             return
-        await c.message.edit_text(
+        await _safe_edit(c.message, 
             f"✅ Куплен <code>{rent.phone}</code>\n"
             f"Сервис: <b>{rent.service_name}</b>\n"
             f"Цена: {rent.price}\n"
@@ -274,7 +275,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     async def cb_buy_cancel(c: CallbackQuery, state: FSMContext):
         await c.answer()
         await state.clear()
-        await c.message.edit_text("Отменено.")
+        await _safe_edit(c.message, "Отменено.")
 
     @r.callback_query(F.data.startswith("ab:fromplan:"))
     async def cb_ab_from_plan(c: CallbackQuery, state: FSMContext):
@@ -284,7 +285,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         svc_id = data.get("service_id")
         plan = await _find_plan(svc_id, plan_id) if svc_id else None
         if not plan:
-            await c.message.edit_text("План не найден, попробуй ещё раз.")
+            await _safe_edit(c.message, "План не найден, попробуй ещё раз.")
             return
         from config import settings
         job_id = await db.add_job(
@@ -295,14 +296,24 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         )
         await autobuy.enable(job_id)
         job = await db.get_job(job_id)
-        await c.message.edit_text(
+        await _safe_edit(c.message, 
             f"🤖 Автобай создан и запущен.\n\n{_job_text(job)}",
             reply_markup=autobuy_job_kb(job),
         )
         await state.clear()
 
     # ───────── helpers ─────────
-    async def _show_services(target, state: FSMContext, page: int, prefix: str, edit: bool = False) -> None:
+    async def _safe_edit(msg: Message, text: str, reply_markup=None) -> None:
+        """Edit message; swallow 'not modified', log unexpected errors. Never sends a duplicate."""
+        try:
+            await msg.edit_text(text, reply_markup=reply_markup)
+        except TelegramBadRequest as e:
+            es = str(e).lower()
+            if "message is not modified" in es or "message can't be edited" in es:
+                return
+            log.warning("edit_text failed: %s", e)
+
+    async def _show_services(target: Message, state: FSMContext, page: int, prefix: str, edit: bool = False) -> None:
         try:
             services, meta = await api.services(page=page, per_page=SERVICES_PER_PAGE)
         except GotSmsError as e:
@@ -312,14 +323,11 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         text = "Выбери сервис:"
         kb = services_kb(services, page=page, has_next=has_next, prefix=prefix)
         if edit:
-            try:
-                await target.edit_text(text, reply_markup=kb)
-                return
-            except Exception:
-                pass
-        await target.answer(text, reply_markup=kb)
+            await _safe_edit(target, text, reply_markup=kb)
+        else:
+            await target.answer(text, reply_markup=kb)
 
-    async def _show_plans(target, state: FSMContext, service_id: str, page: int, prefix: str, edit: bool = False) -> None:
+    async def _show_plans(target: Message, state: FSMContext, service_id: str, page: int, prefix: str, edit: bool = False) -> None:
         try:
             plans, meta = await api.plans(service_id=service_id, page=page, per_page=PLANS_PER_PAGE)
         except GotSmsError as e:
@@ -332,12 +340,9 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             text = f"Сервис: <b>{plans[0].service_name}</b>\nВыбери план:"
         kb = plans_kb(plans, page=page, has_next=has_next, prefix=prefix, service_id=service_id)
         if edit:
-            try:
-                await target.edit_text(text, reply_markup=kb)
-                return
-            except Exception:
-                pass
-        await target.answer(text, reply_markup=kb)
+            await _safe_edit(target, text, reply_markup=kb)
+        else:
+            await target.answer(text, reply_markup=kb)
 
     async def _find_plan(service_id: str, plan_id: str) -> Plan | None:
         page = 1

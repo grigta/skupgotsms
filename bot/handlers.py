@@ -116,34 +116,33 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
 
     @r.callback_query(F.data == "ab:new")
     async def ab_new(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         await state.clear()
         await state.update_data(prefix="ab")
-        await c.message.answer("Выбери сервис для автобая:")
         await _show_services(c.message, state, page=1, prefix="ab")
-        await c.answer()
 
     @r.callback_query(F.data.startswith("ab:open:"))
     async def ab_open(c: CallbackQuery):
+        await c.answer()
         job_id = int(c.data.split(":")[2])
         job = await db.get_job(job_id)
         if not job:
             await c.answer("Не найдено", show_alert=True)
             return
         await c.message.edit_text(_job_text(job), reply_markup=autobuy_job_kb(job))
-        await c.answer()
 
     @r.callback_query(F.data == "ab:back")
     async def ab_back(c: CallbackQuery):
+        await c.answer()
         jobs = await db.list_jobs()
         await c.message.edit_text("🤖 Автобаи:", reply_markup=autobuy_list_kb(jobs))
-        await c.answer()
 
     @r.callback_query(F.data.startswith("ab:toggle:"))
     async def ab_toggle(c: CallbackQuery):
+        await c.answer()
         job_id = int(c.data.split(":")[2])
         job = await db.get_job(job_id)
         if not job:
-            await c.answer("Не найдено", show_alert=True)
             return
         if job.enabled:
             await autobuy.disable(job_id)
@@ -151,25 +150,24 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await autobuy.enable(job_id)
         job = await db.get_job(job_id)
         await c.message.edit_text(_job_text(job), reply_markup=autobuy_job_kb(job))
-        await c.answer("ВКЛ" if job.enabled else "ВЫКЛ")
 
     @r.callback_query(F.data.startswith("ab:del:"))
     async def ab_del(c: CallbackQuery):
+        await c.answer()
         job_id = int(c.data.split(":")[2])
         await autobuy.remove(job_id)
         jobs = await db.list_jobs()
         await c.message.edit_text("Удалено.\n\n🤖 Автобаи:", reply_markup=autobuy_list_kb(jobs))
-        await c.answer()
 
     @r.callback_query(F.data.startswith("ab:interval:"))
     async def ab_interval(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         job_id = int(c.data.split(":")[2])
         await state.set_state(IntervalFlow.waiting_value)
         await state.update_data(job_id=job_id)
         await c.message.answer(
             "Введи интервал в минутах (1–1440). Например: <code>5</code>"
         )
-        await c.answer()
 
     @r.message(IntervalFlow.waiting_value)
     async def ab_interval_set(m: Message, state: FSMContext):
@@ -191,54 +189,54 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     # ───────── Service / plan flow shared ─────────
     @r.callback_query(F.data.regexp(r"^(buy|ab):svcpage:(\d+)$"))
     async def cb_svc_page(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         prefix, _, page_s = c.data.split(":")
         await _show_services(c.message, state, page=int(page_s), prefix=prefix, edit=True)
-        await c.answer()
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):svc:.+$"))
     async def cb_svc_pick(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         prefix, _, svc_id = c.data.split(":", 2)
         await state.update_data(prefix=prefix, service_id=svc_id)
         await _show_plans(c.message, state, service_id=svc_id, page=1, prefix=prefix, edit=True)
-        await c.answer()
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):planpage:[^:]+:\d+$"))
     async def cb_plan_page(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         prefix, _, svc_id, page_s = c.data.split(":")
         await _show_plans(c.message, state, service_id=svc_id, page=int(page_s), prefix=prefix, edit=True)
-        await c.answer()
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):back$"))
     async def cb_back_to_svc(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         prefix = c.data.split(":")[0]
         await _show_services(c.message, state, page=1, prefix=prefix, edit=True)
-        await c.answer()
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):cancel$"))
     async def cb_cancel(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         await state.clear()
         await c.message.edit_text("Отменено.")
-        await c.answer()
 
     @r.callback_query(F.data.regexp(r"^(buy|ab):plan:.+$"))
     async def cb_plan_pick(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         prefix, _, plan_id = c.data.split(":", 2)
         data = await state.get_data()
         svc_id = data.get("service_id")
         plan = await _find_plan(svc_id, plan_id) if svc_id else None
         if not plan:
-            await c.answer("План не найден", show_alert=True)
+            await c.message.edit_text("План не найден, попробуй ещё раз.")
             return
 
         if prefix == "buy":
             await c.message.edit_text(_plan_text(plan), reply_markup=confirm_buy_kb(plan.id))
         else:  # ab
-            label = _plan_label(plan)
             from config import settings
             job_id = await db.add_job(
                 plan_id=plan.id,
                 service_name=plan.service_name,
-                plan_label=label,
+                plan_label=_plan_label(plan),
                 interval_min=settings.default_autobuy_interval_min,
             )
             await autobuy.enable(job_id)
@@ -248,25 +246,22 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 reply_markup=autobuy_job_kb(job),
             )
         await state.clear()
-        await c.answer()
 
     @r.callback_query(F.data.startswith("buy:confirm:"))
     async def cb_buy_confirm(c: CallbackQuery, state: FSMContext):
+        await c.answer("Покупаю…")
         plan_id = c.data.split(":", 2)[2]
         await state.clear()
         try:
             rent = await api.create_rent(plan_id)
         except NoNumbersAvailable:
             await c.message.edit_text("😕 Свободных номеров сейчас нет, попробуй позже.")
-            await c.answer()
             return
         except InsufficientFunds:
             await c.message.edit_text("💸 Недостаточно средств.")
-            await c.answer()
             return
         except GotSmsError as e:
             await c.message.edit_text(f"Ошибка {e.status}: <code>{e.payload}</code>")
-            await c.answer()
             return
         await c.message.edit_text(
             f"✅ Куплен <code>{rent.phone}</code>\n"
@@ -274,22 +269,22 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             f"Цена: {rent.price}\n"
             f"Активен до: {rent.active_till or '—'}"
         )
-        await c.answer()
 
     @r.callback_query(F.data == "buy:cancel")
     async def cb_buy_cancel(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         await state.clear()
         await c.message.edit_text("Отменено.")
-        await c.answer()
 
     @r.callback_query(F.data.startswith("ab:fromplan:"))
     async def cb_ab_from_plan(c: CallbackQuery, state: FSMContext):
+        await c.answer()
         plan_id = c.data.split(":", 2)[2]
         data = await state.get_data()
         svc_id = data.get("service_id")
         plan = await _find_plan(svc_id, plan_id) if svc_id else None
         if not plan:
-            await c.answer("План не найден", show_alert=True)
+            await c.message.edit_text("План не найден, попробуй ещё раз.")
             return
         from config import settings
         job_id = await db.add_job(
@@ -305,7 +300,6 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             reply_markup=autobuy_job_kb(job),
         )
         await state.clear()
-        await c.answer()
 
     # ───────── helpers ─────────
     async def _show_services(target, state: FSMContext, page: int, prefix: str, edit: bool = False) -> None:

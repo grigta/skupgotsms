@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -83,7 +84,7 @@ def _extract_price(item: dict) -> float:
 
 
 class GotSmsClient:
-    def __init__(self, token: str, base_url: str = "https://app.gotsms.org", timeout: float = 30.0):
+    def __init__(self, token: str, base_url: str = "https://app.gotsms.org", timeout: float = 30.0, cache_ttl: float = 60.0):
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={
@@ -92,7 +93,30 @@ class GotSmsClient:
                 "Accept": "application/json",
             },
             timeout=timeout,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
         )
+        self._cache_ttl = cache_ttl
+        self._cache: dict[str, tuple[float, Any]] = {}
+
+    def invalidate_cache(self, prefix: str | None = None) -> None:
+        if prefix is None:
+            self._cache.clear()
+            return
+        for k in [k for k in self._cache if k.startswith(prefix)]:
+            self._cache.pop(k, None)
+
+    def _cache_get(self, key: str) -> Any | None:
+        item = self._cache.get(key)
+        if not item:
+            return None
+        ts, val = item
+        if time.monotonic() - ts > self._cache_ttl:
+            self._cache.pop(key, None)
+            return None
+        return val
+
+    def _cache_set(self, key: str, val: Any) -> None:
+        self._cache[key] = (time.monotonic(), val)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -125,12 +149,18 @@ class GotSmsClient:
         return float(data.get("data", {}).get("balance", 0))
 
     async def services(self, search: str | None = None, page: int = 1, per_page: int = 50) -> tuple[list[Service], dict]:
+        cache_key = f"services:{search or ''}:{page}:{per_page}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
         params: dict[str, Any] = {"page": page, "per_page": per_page}
         if search:
             params["search"] = search
         data = await self._request("GET", "/api/services", params=params)
         items = [Service(id=str(x["id"]), name=x["name"]) for x in data.get("data", [])]
-        return items, data.get("meta", {})
+        result = (items, data.get("meta", {}))
+        self._cache_set(cache_key, result)
+        return result
 
     async def plans(
         self,
@@ -140,7 +170,13 @@ class GotSmsClient:
         billing_type: str | None = None,
         page: int = 1,
         per_page: int = 50,
+        use_cache: bool = True,
     ) -> tuple[list[Plan], dict]:
+        cache_key = f"plans:{service_id or ''}:{country_id or ''}:{duration_type or ''}:{billing_type or ''}:{page}:{per_page}"
+        if use_cache:
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                return cached
         params: dict[str, Any] = {"page": page, "per_page": per_page}
         if service_id:
             params["service_id"] = service_id
@@ -168,7 +204,9 @@ class GotSmsClient:
                     raw=x,
                 )
             )
-        return items, data.get("meta", {})
+        result = (items, data.get("meta", {}))
+        self._cache_set(cache_key, result)
+        return result
 
     async def create_rent(self, plan_id: str, area_code: str | None = None) -> Rent:
         body: dict[str, Any] = {"plan_id": plan_id}

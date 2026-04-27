@@ -95,9 +95,9 @@ class AutobuyManager:
                     await self.notify(f"⛔ Автобай <b>{job.service_name}</b> остановлен (auth error)")
                 return
 
-            # refresh price each tick
+            # refresh price each tick (bypass cache)
             try:
-                plans, _ = await self.api.plans()
+                plans, _ = await self.api.plans(use_cache=False)
                 target = next((p for p in plans if p.id == job.plan_id), None)
                 price = target.price if target else 0.0
             except GotSmsError:

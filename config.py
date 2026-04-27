@@ -1,12 +1,14 @@
+from typing import Annotated
+
 from pydantic import AliasChoices, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     telegram_bot_token: str
-    telegram_user_ids: list[int] = Field(
+    telegram_user_ids: Annotated[list[int], NoDecode] = Field(
         validation_alias=AliasChoices("TELEGRAM_USER_IDS", "TELEGRAM_USER_ID")
     )
     gotsms_api_token: str

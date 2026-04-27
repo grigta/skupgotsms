@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+log = logging.getLogger("gotsms")
 
 
 class GotSmsError(Exception):
@@ -145,6 +148,10 @@ class GotSmsClient:
             payload = {"raw": resp.text}
 
         if resp.status_code >= 400:
+            log.warning(
+                "%s %s -> %d body=%s payload=%s",
+                method, path, resp.status_code, kwargs.get("json"), payload,
+            )
             text = str(payload).lower()
             if "no numbers" in text or "not available" in text or "out of stock" in text:
                 raise NoNumbersAvailable(resp.status_code, payload)

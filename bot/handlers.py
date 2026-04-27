@@ -26,14 +26,14 @@ SERVICES_PER_PAGE = 12
 PLANS_PER_PAGE = 12
 
 
-def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_user_id: int) -> Router:
+def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_user_ids: set[int]) -> Router:
     r = Router()
 
-    @r.message(F.from_user.id != allowed_user_id)
+    @r.message(F.from_user.id.func(lambda uid: uid not in allowed_user_ids))
     async def _block_others(m: Message):
         log.warning("rejected user %s", m.from_user.id if m.from_user else "?")
 
-    @r.callback_query(F.from_user.id != allowed_user_id)
+    @r.callback_query(F.from_user.id.func(lambda uid: uid not in allowed_user_ids))
     async def _block_others_cb(c: CallbackQuery):
         await c.answer("Доступ запрещён", show_alert=True)
 

@@ -95,16 +95,28 @@ class AutobuyManager:
                     await self.notify(f"⛔ Автобай <b>{job.service_name}</b> остановлен (auth error)")
                 return
 
-            # refresh price each tick (bypass cache)
+            # backfill service_id for jobs created before the column existed
+            if not job.service_id:
+                await self.db.record_run(job.id, 0, "missing_service_id")
+                await self.disable(job.id)
+                await self.notify(
+                    f"⛔ Автобай <b>{job.service_name}</b> создан в старой версии "
+                    f"бота (нет service_id). Удали и пересоздай."
+                )
+                return
+
+            # refresh price each tick (bypass cache, fetch only this service's plans)
             try:
-                plans, _ = await self.api.plans(use_cache=False)
+                plans = await self.api.plans_all(service_id=job.service_id, per_page=100, use_cache=False)
                 target = next((p for p in plans if p.id == job.plan_id), None)
                 price = target.price if target else 0.0
-            except GotSmsError:
+            except GotSmsError as e:
+                log.warning("plans fetch failed: %s", e)
                 price = 0.0
 
             if price <= 0:
                 await self.db.record_run(job.id, 0, "no_price")
+                log.warning("no price for job=%s plan=%s service=%s", job.id, job.plan_id, job.service_id)
                 return
 
             # greedy buy while balance allows

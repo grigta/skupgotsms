@@ -10,6 +10,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS autobuy_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     plan_id TEXT NOT NULL,
+    service_id TEXT,
     service_name TEXT NOT NULL,
     plan_label TEXT NOT NULL,
     interval_min INTEGER NOT NULL DEFAULT 5,
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS settings (
 class AutobuyJob:
     id: int
     plan_id: str
+    service_id: str | None
     service_name: str
     plan_label: str
     interval_min: int
@@ -48,19 +50,29 @@ class DB:
     async def init(self) -> None:
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
+            # additive migration: add service_id column to pre-existing tables
+            async with db.execute("PRAGMA table_info(autobuy_jobs)") as cur:
+                cols = {row[1] for row in await cur.fetchall()}
+            if "service_id" not in cols:
+                await db.execute("ALTER TABLE autobuy_jobs ADD COLUMN service_id TEXT")
             await db.commit()
 
-    async def add_job(self, plan_id: str, service_name: str, plan_label: str, interval_min: int) -> int:
+    async def add_job(self, plan_id: str, service_id: str, service_name: str, plan_label: str, interval_min: int) -> int:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
-                "INSERT INTO autobuy_jobs (plan_id, service_name, plan_label, interval_min) VALUES (?, ?, ?, ?)",
-                (plan_id, service_name, plan_label, interval_min),
+                "INSERT INTO autobuy_jobs (plan_id, service_id, service_name, plan_label, interval_min) VALUES (?, ?, ?, ?, ?)",
+                (plan_id, service_id, service_name, plan_label, interval_min),
             )
             await db.commit()
             return cur.lastrowid
 
+    async def set_service_id(self, job_id: int, service_id: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE autobuy_jobs SET service_id = ? WHERE id = ?", (service_id, job_id))
+            await db.commit()
+
     async def list_jobs(self, only_enabled: bool = False) -> list[AutobuyJob]:
-        q = "SELECT id, plan_id, service_name, plan_label, interval_min, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs"
+        q = "SELECT id, plan_id, service_id, service_name, plan_label, interval_min, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs"
         if only_enabled:
             q += " WHERE enabled = 1"
         q += " ORDER BY id DESC"
@@ -69,9 +81,9 @@ class DB:
                 rows = await cur.fetchall()
         return [
             AutobuyJob(
-                id=r[0], plan_id=r[1], service_name=r[2], plan_label=r[3],
-                interval_min=r[4], enabled=bool(r[5]), bought_count=r[6],
-                last_run_at=r[7], last_status=r[8],
+                id=r[0], plan_id=r[1], service_id=r[2], service_name=r[3], plan_label=r[4],
+                interval_min=r[5], enabled=bool(r[6]), bought_count=r[7],
+                last_run_at=r[8], last_status=r[9],
             )
             for r in rows
         ]
@@ -79,16 +91,16 @@ class DB:
     async def get_job(self, job_id: int) -> AutobuyJob | None:
         async with aiosqlite.connect(self.path) as db:
             async with db.execute(
-                "SELECT id, plan_id, service_name, plan_label, interval_min, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs WHERE id = ?",
+                "SELECT id, plan_id, service_id, service_name, plan_label, interval_min, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs WHERE id = ?",
                 (job_id,),
             ) as cur:
                 r = await cur.fetchone()
         if not r:
             return None
         return AutobuyJob(
-            id=r[0], plan_id=r[1], service_name=r[2], plan_label=r[3],
-            interval_min=r[4], enabled=bool(r[5]), bought_count=r[6],
-            last_run_at=r[7], last_status=r[8],
+            id=r[0], plan_id=r[1], service_id=r[2], service_name=r[3], plan_label=r[4],
+            interval_min=r[5], enabled=bool(r[6]), bought_count=r[7],
+            last_run_at=r[8], last_status=r[9],
         )
 
     async def set_enabled(self, job_id: int, enabled: bool) -> None:

@@ -255,6 +255,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             from config import settings
             job_id = await db.add_job(
                 plan_id=plan.id,
+                service_id=plan.service_id,
                 service_name=plan.service_name,
                 plan_label=_plan_label(plan),
                 interval_min=settings.default_autobuy_interval_min,

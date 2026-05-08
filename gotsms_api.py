@@ -270,8 +270,8 @@ class GotSmsClient:
             self._cache_set(cache_key, result)
             return result
 
-    async def plans_all(self, service_id: str, per_page: int = 100) -> list[Plan]:
-        items, _ = await self.plans(service_id=service_id, page=1, per_page=per_page)
+    async def plans_all(self, service_id: str, per_page: int = 100, use_cache: bool = True) -> list[Plan]:
+        items, _ = await self.plans(service_id=service_id, page=1, per_page=per_page, use_cache=use_cache)
         return items
 
     async def create_rent(self, plan_id: str, area_code: str | None = None) -> Rent:

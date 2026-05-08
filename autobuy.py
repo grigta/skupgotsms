@@ -30,6 +30,7 @@ class AutobuyManager:
     async def restore(self) -> None:
         for job in await self.db.list_jobs(only_enabled=True):
             self._schedule(job)
+            asyncio.create_task(self._tick(job.id))
 
     def _job_id(self, job_id: int) -> str:
         return f"autobuy:{job_id}"

@@ -90,18 +90,18 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     @r.message(F.text == "📨 SMS")
     async def show_unread(m: Message):
         try:
-            msgs = await api.unread_messages(mark_as_read=True, per_page=30)
+            msgs = await api.unread_messages(mark_as_read=True, per_page=50)
         except GotSmsError as e:
             await m.answer(f"Ошибка API {e.status}")
             return
-        if not msgs:
-            await m.answer("Непрочитанных SMS нет.")
+        coded = [s for s in msgs if (s.code or "").strip()]
+        if not coded:
+            await m.answer("Непрочитанных SMS с кодом нет.")
             return
-        for sms in msgs[:20]:
+        for sms in coded[:20]:
             await m.answer(
                 f"📨 <b>{sms.service_name}</b> · <code>{sms.phone}</code>\n"
-                f"От: {sms.sender}\n"
-                f"Код: <b>{sms.code or '—'}</b>\n"
+                f"Код: <b>{sms.code}</b>\n"
                 f"<i>{sms.body}</i>"
             )
 

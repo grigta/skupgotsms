@@ -12,10 +12,10 @@ from gotsms_api import GotSmsClient, GotSmsError, NoNumbersAvailable, Insufficie
 
 log = logging.getLogger("autobuy")
 
-# Лестница батчей: пробуем 100 параллельно, пока пул держит полный батч.
-# Как только батч недобрался — спускаемся ступенью ниже (100→50→25→1),
-# добивая остаток пула всё меньшими пачками.
-BATCH_LADDER = [100, 50, 25, 1]
+# Лестница батчей под лимит API (30 запросов/мин на всё): держим полный
+# батч ступень, на недоборе спускаемся 25 → 10 → 1. Темп держит rate-limiter
+# в клиенте (GotSmsClient), так что 429 ловить не будем.
+BATCH_LADDER = [25, 10, 1]
 
 # Notify callback: (text) -> awaitable. Set by main.
 NotifyFn = Callable[[str], Awaitable[None]]

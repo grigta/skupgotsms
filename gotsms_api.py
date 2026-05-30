@@ -104,6 +104,11 @@ class GotSmsClient:
         self._cache_ttl = cache_ttl
         self._cache: dict[str, tuple[float, Any]] = {}
         self._cache_locks: dict[str, asyncio.Lock] = {}
+        # ── центральный rate-limiter (общий бак на все /api: 30 запросов/мин) ──
+        self._rl_lock = asyncio.Lock()
+        self._rl_limit = 30          # X-RateLimit-Limit
+        self._rl_remaining = 30      # локальный бюджет окна
+        self._rl_reset_unix = 0.0    # unix-время сброса окна (из X-RateLimit-Reset)
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         lock = self._cache_locks.get(key)
@@ -141,8 +146,51 @@ class GotSmsClient:
     async def __aexit__(self, *_):
         await self.aclose()
 
+    async def _gate(self) -> None:
+        """Пропускной шлюз: не даём окну уйти в минус, при исчерпании — спим до сброса."""
+        async with self._rl_lock:
+            if self._rl_remaining <= 0:
+                wait = self._rl_reset_unix - time.time()
+                if wait > 0:
+                    log.info("rate-limit: ждём сброса окна %.1fс", wait)
+                    await asyncio.sleep(min(wait + 0.5, 65))
+                self._rl_remaining = self._rl_limit  # окно сбросилось
+                self._rl_reset_unix = time.time() + 60
+            self._rl_remaining -= 1
+
+    def _note_ratelimit(self, resp: httpx.Response) -> None:
+        h = resp.headers
+        try:
+            if "x-ratelimit-limit" in h:
+                self._rl_limit = int(h["x-ratelimit-limit"])
+            if "x-ratelimit-remaining" in h:
+                self._rl_remaining = min(self._rl_remaining, int(h["x-ratelimit-remaining"]))
+            if "x-ratelimit-reset" in h:
+                self._rl_reset_unix = float(h["x-ratelimit-reset"])
+        except (ValueError, TypeError):
+            pass
+
+    async def _cooldown(self, resp: httpx.Response) -> None:
+        ra = resp.headers.get("retry-after")
+        wait = max(float(ra) if ra else (self._rl_reset_unix - time.time()), 1.0)
+        async with self._rl_lock:
+            self._rl_remaining = 0
+            self._rl_reset_unix = time.time() + wait
+        log.warning("rate-limit 429: пауза %.1fс", wait)
+        await asyncio.sleep(min(wait + 0.5, 65))
+
     async def _request(self, method: str, path: str, **kwargs) -> Any:
-        resp = await self._client.request(method, path, **kwargs)
+        attempt = 0
+        while True:
+            await self._gate()
+            resp = await self._client.request(method, path, **kwargs)
+            self._note_ratelimit(resp)
+            if resp.status_code == 429 and attempt < 4:
+                attempt += 1
+                await self._cooldown(resp)
+                continue
+            break
+
         try:
             payload = resp.json()
         except ValueError:

@@ -90,6 +90,16 @@ def autobuy_job_kb(job: AutobuyJob) -> InlineKeyboardMarkup:
     ])
 
 
+def refund_services_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🌐 Все сервисы", callback_data="rf:svc:all")]
+    ]
+    for sid, label in items:
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"rf:svc:{sid}")])
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="rf:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def refund_confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Рефандить", callback_data="rf:confirm")],

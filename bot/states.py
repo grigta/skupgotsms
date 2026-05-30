@@ -15,5 +15,6 @@ class LimitFlow(StatesGroup):
 
 
 class RefundFlow(StatesGroup):
+    choosing_service = State()
     waiting_list = State()
     confirming = State()

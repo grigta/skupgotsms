@@ -48,6 +48,7 @@ class Plan:
 @dataclass
 class Rent:
     id: str
+    service_id: str
     service_name: str
     phone: str
     price: float
@@ -319,6 +320,7 @@ class GotSmsClient:
         service = x.get("service") or {}
         return Rent(
             id=str(x["id"]),
+            service_id=str(service.get("id", "")),
             service_name=service.get("name", "—"),
             phone=str(x.get("phone", "")),
             price=float(x.get("price", 0) or 0),

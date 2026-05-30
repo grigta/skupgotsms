@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections import defaultdict
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -22,6 +23,7 @@ from .keyboards import (
     main_menu,
     plans_kb,
     refund_confirm_kb,
+    refund_services_kb,
     services_kb,
 )
 from .states import BuyFlow, IntervalFlow, LimitFlow, RefundFlow
@@ -109,12 +111,46 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     @r.message(F.text == "💸 Рефанд")
     async def refund_start(m: Message, state: FSMContext):
         await state.clear()
-        await state.set_state(RefundFlow.waiting_list)
+        try:
+            rents = await api.list_rents_all(status="active")
+        except GotSmsError as e:
+            await m.answer(f"Ошибка API {e.status} при загрузке аренд.")
+            return
+        if not rents:
+            await m.answer("Активных аренд нет — рефандить нечего.")
+            return
+        # сгруппировать по сервису (один номер может висеть на нескольких)
+        counts: dict[tuple[str, str], int] = {}
+        for rt in rents:
+            counts[(rt.service_id, rt.service_name)] = counts.get((rt.service_id, rt.service_name), 0) + 1
+        items = sorted(counts.items(), key=lambda kv: kv[0][1].lower())
+        svc_buttons = [(sid, f"{name} ({n})") for (sid, name), n in items]
+        await state.update_data(svc_list=[[sid, name] for (sid, name), _ in items])
+        await state.set_state(RefundFlow.choosing_service)
         await m.answer(
-            "💸 Пришли номера для рефанда — <b>по одному на строку</b> "
-            "(можно с +, пробелами, дефисами — формат не важен).\n\n"
-            "Рефанднутся только те, что сейчас в активных арендах.\n"
-            "Отмена — /menu."
+            f"💸 Рефанд. Активных аренд: <b>{len(rents)}</b> на {len(items)} сервисах.\n"
+            "Выбери сервис (или «🌐 Все сервисы» — рефанднет номер на всех сервисах):",
+            reply_markup=refund_services_kb(svc_buttons),
+        )
+
+    @r.callback_query(RefundFlow.choosing_service, F.data.startswith("rf:svc:"))
+    async def refund_pick_service(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        sid = c.data.split(":", 2)[2]
+        data = await state.get_data()
+        names = {s[0]: s[1] for s in (data.get("svc_list") or [])}
+        if sid == "all":
+            await state.update_data(svc_id=None)
+            scope = "🌐 все сервисы"
+        else:
+            await state.update_data(svc_id=sid)
+            scope = names.get(sid, "выбранный сервис")
+        await state.set_state(RefundFlow.waiting_list)
+        await _safe_edit(
+            c.message,
+            f"💸 Рефанд · <b>{scope}</b>.\n\n"
+            "Пришли номера — <b>по одному на строку</b> (формат любой: с +, пробелами, дефисами).\n"
+            "Рефанднутся только активные аренды в этом фильтре. Отмена — /menu.",
         )
 
     @r.message(RefundFlow.waiting_list)
@@ -127,6 +163,8 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await m.answer(f"Слишком много ({len(wanted)}). Максимум {REFUND_MAX} за раз.")
             return
 
+        data = await state.get_data()
+        svc_id = data.get("svc_id")  # None = все сервисы
         await m.answer("⏳ Загружаю активные аренды и сопоставляю…")
         try:
             rents = await api.list_rents_all(status="active")
@@ -134,24 +172,27 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await state.clear()
             await m.answer(f"Ошибка API {e.status} при загрузке аренд.")
             return
+        if svc_id:
+            rents = [r for r in rents if r.service_id == svc_id]
 
-        # индексируем активные аренды по полным цифрам и по последним 10
-        by_full: dict[str, object] = {}
-        by_last10: dict[str, object] = {}
+        # индексируем по цифрам, собирая ВСЕ аренды на номер (дубли на разных сервисах)
+        by_full: dict[str, list] = defaultdict(list)
+        by_last10: dict[str, list] = defaultdict(list)
         for rt in rents:
             d = _digits(rt.phone)
             if not d:
                 continue
-            by_full.setdefault(d, rt)
-            by_last10.setdefault(d[-10:], rt)
+            by_full[d].append(rt)
+            by_last10[d[-10:]].append(rt)
 
-        matched: dict[str, object] = {}  # rent_id -> rent (дедуп)
+        matched: dict[str, object] = {}  # rent_id -> rent
         not_found: list[str] = []
         for raw in wanted:
             d = _digits(raw)
-            rt = by_full.get(d) or (by_last10.get(d[-10:]) if len(d) >= 10 else None)
-            if rt:
-                matched[rt.id] = rt
+            hits = by_full.get(d) or (by_last10.get(d[-10:]) if len(d) >= 10 else None) or []
+            if hits:
+                for rt in hits:
+                    matched[rt.id] = rt
             else:
                 not_found.append(raw)
 
@@ -159,20 +200,26 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await state.clear()
             await m.answer(
                 f"Совпадений среди активных аренд нет (проверено {len(wanted)}). "
-                "Возможно, номера уже неактивны."
+                "Возможно, номера уже неактивны или не на этом сервисе."
             )
             return
 
-        total = sum(float(rt.price or 0) for rt in matched.values())
+        rows = list(matched.values())
+        total = sum(float(rt.price or 0) for rt in rows)
+        per_svc: dict[str, int] = {}
+        for rt in rows:
+            per_svc[rt.service_name] = per_svc.get(rt.service_name, 0) + 1
+        breakdown = " · ".join(f"{k}: {v}" for k, v in sorted(per_svc.items()))
+
         await state.update_data(rent_ids=list(matched.keys()))
         await state.set_state(RefundFlow.confirming)
 
-        rows = list(matched.values())
         preview = "\n".join(f"• <code>{rt.phone}</code> — {rt.service_name}" for rt in rows[:15])
         more = f"\n…и ещё {len(rows) - 15}" if len(rows) > 15 else ""
-        nf_line = f"\n⚠️ Не найдено среди активных: {len(not_found)}" if not_found else ""
+        nf_line = f"\n⚠️ Не найдено: {len(not_found)}" if not_found else ""
         await m.answer(
-            f"Найдено <b>{len(matched)}</b> из {len(wanted)} на сумму ~<b>{total:.2f}</b>.{nf_line}\n\n"
+            f"К рефанду: <b>{len(rows)}</b> аренд (из {len(wanted)} номеров) на ~<b>{total:.2f}</b>.\n"
+            f"По сервисам: {breakdown}.{nf_line}\n\n"
             f"{preview}{more}\n\nРефандить?",
             reply_markup=refund_confirm_kb(),
         )

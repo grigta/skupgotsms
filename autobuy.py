@@ -12,6 +12,10 @@ from gotsms_api import GotSmsClient, GotSmsError, NoNumbersAvailable, Insufficie
 
 log = logging.getLogger("autobuy")
 
+# Сколько номеров пробуем выкупить параллельно за раунд, пока пул держит
+# полные батчи. Как только батч недобрался — переключаемся на добор по 1.
+BATCH_SIZE = 25
+
 # Notify callback: (text) -> awaitable. Set by main.
 NotifyFn = Callable[[str], Awaitable[None]]
 
@@ -80,6 +84,19 @@ class AutobuyManager:
         self._unschedule(job_id)
         await self.db.delete_job(job_id)
 
+    async def _buy_one(self, plan_id: str) -> tuple[str, object | None]:
+        """Одна покупка. Возвращает ('ok', rent) | ('no_numbers'|'insufficient_funds'|f'err:{code}', None)."""
+        try:
+            rent = await self.api.create_rent(plan_id)
+            return ("ok", rent)
+        except NoNumbersAvailable:
+            return ("no_numbers", None)
+        except InsufficientFunds:
+            return ("insufficient_funds", None)
+        except GotSmsError as e:
+            log.warning("buy failed: %s", e)
+            return (f"err:{e.status}", None)
+
     async def _tick(self, job_id: int) -> None:
         async with self._lock:  # serialize all autobuy ticks to avoid race on balance
             job = await self.db.get_job(job_id)
@@ -131,30 +148,43 @@ class AutobuyManager:
 
             limit = job.buy_limit  # 0 = без лимита
             already = job.bought_count
+            batch = BATCH_SIZE  # полные батчи, потом добор по 1
 
-            # greedy buy while balance allows and limit not reached
+            # батчевый выкуп: жмём пул по 25, на «недоборе» падаем в режим по 1
             while balance >= price and (limit == 0 or already + len(bought) < limit):
-                try:
-                    rent = await self.api.create_rent(job.plan_id)
-                except NoNumbersAvailable:
+                affordable = int(balance // price)              # сколько потянет баланс
+                room = (limit - already - len(bought)) if limit else affordable  # сколько до лимита
+                n = min(batch, affordable, room)
+                if n <= 0:
+                    if affordable <= 0:
+                        status = "insufficient_funds"
+                    break
+
+                results = await asyncio.gather(*[self._buy_one(job.plan_id) for _ in range(n)])
+                kinds = [s for (s, _) in results]
+                got = [r for (s, r) in results if s == "ok" and r is not None]
+
+                for rent in got:
+                    bought.append(rent.phone)
+                if got:
+                    sample = "\n".join(f"<code>{r.phone}</code>" for r in got[:BATCH_SIZE])
+                    await self.notify(f"✅ Куплено {len(got)} ({job.service_name}):\n{sample}")
+
+                # батч недобрался (пул сдувается) → переключаемся на добор по 1
+                if batch > 1 and ("no_numbers" in kinds or len(got) < n):
+                    batch = 1
+                # в режиме по 1 пустой результат с no_numbers = пул кончился → стоп
+                if batch == 1 and not got and "no_numbers" in kinds:
                     status = "no_numbers"
                     break
-                except InsufficientFunds:
+                if "insufficient_funds" in kinds:
                     status = "insufficient_funds"
                     break
-                except GotSmsError as e:
-                    status = f"err:{e.status}"
-                    log.warning("buy failed: %s", e)
+                errs = [s for s in kinds if s.startswith("err:")]
+                if errs and not got:
+                    status = errs[0]
                     break
 
-                bought.append(rent.phone)
-                await self.notify(
-                    f"✅ Куплен номер <code>{rent.phone}</code>\n"
-                    f"Сервис: <b>{rent.service_name}</b>\n"
-                    f"Цена: {rent.price}\n"
-                    f"Активен до: {rent.active_till or '—'}"
-                )
-                # refresh balance from server (price could have changed too, but rare per tick)
                 try:
                     balance = await self.api.balance()
                 except GotSmsError:

@@ -12,9 +12,10 @@ from gotsms_api import GotSmsClient, GotSmsError, NoNumbersAvailable, Insufficie
 
 log = logging.getLogger("autobuy")
 
-# Сколько номеров пробуем выкупить параллельно за раунд, пока пул держит
-# полные батчи. Как только батч недобрался — переключаемся на добор по 1.
-BATCH_SIZE = 25
+# Лестница батчей: пробуем 100 параллельно, пока пул держит полный батч.
+# Как только батч недобрался — спускаемся ступенью ниже (100→50→25→1),
+# добивая остаток пула всё меньшими пачками.
+BATCH_LADDER = [100, 50, 25, 1]
 
 # Notify callback: (text) -> awaitable. Set by main.
 NotifyFn = Callable[[str], Awaitable[None]]
@@ -148,10 +149,11 @@ class AutobuyManager:
 
             limit = job.buy_limit  # 0 = без лимита
             already = job.bought_count
-            batch = BATCH_SIZE  # полные батчи, потом добор по 1
+            rung = 0  # ступень в BATCH_LADDER: 100 → 50 → 25 → 1
 
-            # батчевый выкуп: жмём пул по 25, на «недоборе» падаем в режим по 1
+            # батчевый выкуп с градацией: полный батч держим ступень, на недоборе — ниже
             while balance >= price and (limit == 0 or already + len(bought) < limit):
+                batch = BATCH_LADDER[rung]
                 affordable = int(balance // price)              # сколько потянет баланс
                 room = (limit - already - len(bought)) if limit else affordable  # сколько до лимита
                 n = min(batch, affordable, room)
@@ -167,23 +169,23 @@ class AutobuyManager:
                 for rent in got:
                     bought.append(rent.phone)
                 if got:
-                    sample = "\n".join(f"<code>{r.phone}</code>" for r in got[:BATCH_SIZE])
+                    sample = "\n".join(f"<code>{r.phone}</code>" for r in got[:50])
                     await self.notify(f"✅ Куплено {len(got)} ({job.service_name}):\n{sample}")
 
-                # батч недобрался (пул сдувается) → переключаемся на добор по 1
-                if batch > 1 and ("no_numbers" in kinds or len(got) < n):
-                    batch = 1
-                # в режиме по 1 пустой результат с no_numbers = пул кончился → стоп
-                if batch == 1 and not got and "no_numbers" in kinds:
-                    status = "no_numbers"
+                if not got:
+                    # ничего не купили на этой ступени → пул пуст / лимит провайдера / 429 / ошибка
+                    if "insufficient_funds" in kinds:
+                        status = "insufficient_funds"
+                    elif "no_numbers" in kinds:
+                        status = "no_numbers"
+                    else:
+                        errs = [s for s in kinds if s.startswith("err:")]
+                        status = errs[0] if errs else "no_numbers"
                     break
-                if "insufficient_funds" in kinds:
-                    status = "insufficient_funds"
-                    break
-                errs = [s for s in kinds if s.startswith("err:")]
-                if errs and not got:
-                    status = errs[0]
-                    break
+
+                # купили меньше, чем пытались → пул сдувается, спускаемся ступенью ниже
+                if len(got) < n and rung < len(BATCH_LADDER) - 1:
+                    rung += 1
 
                 try:
                     balance = await self.api.balance()

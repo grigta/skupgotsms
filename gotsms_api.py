@@ -304,7 +304,8 @@ class GotSmsClient:
         return await self._request("POST", f"/api/rents/{rent_id}/refund")
 
     async def unread_messages(self, mark_as_read: bool = True, per_page: int = 50) -> list[Message]:
-        params = {"mark_as_read": "true" if mark_as_read else "false", "per_page": per_page}
+        # Laravel boolean rule accepts 1/0, NOT the strings "true"/"false" (→ 422)
+        params = {"mark_as_read": 1 if mark_as_read else 0, "per_page": per_page}
         data = await self._request("GET", "/api/messages/unread", params=params)
         return [self._msg_from(x) for x in data.get("data", [])]
 

@@ -410,10 +410,12 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 plan_label=_plan_label(plan),
                 interval_sec=settings.default_autobuy_interval_sec,
             )
-            await autobuy.enable(job_id)
+            await db.set_enabled(job_id, False)  # создаём на паузе — сначала лимит/интервал
             job = await db.get_job(job_id)
             await _safe_edit(c.message,
-                f"🤖 Автобай создан и запущен.\n\n{_job_text(job)}",
+                "🤖 Автобай создан <b>на паузе</b>.\n"
+                "Задай 🎯 Лимит и ⏱ Интервал, затем нажми ▶️ Включить.\n\n"
+                f"{_job_text(job)}",
                 reply_markup=autobuy_job_kb(job),
             )
         await state.clear()
@@ -465,10 +467,12 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             plan_label=_plan_label(plan),
             interval_sec=settings.default_autobuy_interval_sec,
         )
-        await autobuy.enable(job_id)
+        await db.set_enabled(job_id, False)  # создаём на паузе — сначала лимит/интервал
         job = await db.get_job(job_id)
-        await _safe_edit(c.message, 
-            f"🤖 Автобай создан и запущен.\n\n{_job_text(job)}",
+        await _safe_edit(c.message,
+            "🤖 Автобай создан <b>на паузе</b>.\n"
+            "Задай 🎯 Лимит и ⏱ Интервал, затем нажми ▶️ Включить.\n\n"
+            f"{_job_text(job)}",
             reply_markup=autobuy_job_kb(job),
         )
         await state.clear()

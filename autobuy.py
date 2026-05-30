@@ -72,6 +72,10 @@ class AutobuyManager:
         if job and job.enabled:
             self._schedule(job)
 
+    async def set_limit(self, job_id: int, buy_limit: int) -> None:
+        await self.db.set_limit(job_id, buy_limit)
+        # лимит читается из БД на каждом тике — перепланировать не нужно
+
     async def remove(self, job_id: int) -> None:
         self._unschedule(job_id)
         await self.db.delete_job(job_id)
@@ -80,6 +84,11 @@ class AutobuyManager:
         async with self._lock:  # serialize all autobuy ticks to avoid race on balance
             job = await self.db.get_job(job_id)
             if not job or not job.enabled:
+                return
+
+            # лимит уже выбран — гасим задание без лишних запросов к API
+            if job.buy_limit and job.bought_count >= job.buy_limit:
+                await self.disable(job.id)
                 return
 
             log.info("autobuy tick job=%s plan=%s", job.id, job.plan_id)
@@ -120,8 +129,11 @@ class AutobuyManager:
                 log.warning("no price for job=%s plan=%s service=%s", job.id, job.plan_id, job.service_id)
                 return
 
-            # greedy buy while balance allows
-            while balance >= price:
+            limit = job.buy_limit  # 0 = без лимита
+            already = job.bought_count
+
+            # greedy buy while balance allows and limit not reached
+            while balance >= price and (limit == 0 or already + len(bought) < limit):
                 try:
                     rent = await self.api.create_rent(job.plan_id)
                 except NoNumbersAvailable:
@@ -149,7 +161,14 @@ class AutobuyManager:
                     break
 
             await self.db.record_run(job.id, len(bought), status)
-            if bought:
+            total = already + len(bought)
+            if limit and total >= limit:
+                await self.disable(job.id)
+                await self.notify(
+                    f"🎯 Автобай <b>{job.service_name}</b>: лимит {limit} достигнут — остановлен. "
+                    f"Куплено всего: {total}."
+                )
+            elif bought:
                 await self.notify(
                     f"🤖 Автобай <b>{job.service_name}</b>: куплено {len(bought)} шт. за тик. "
                     f"Остаток: {balance:.2f}"

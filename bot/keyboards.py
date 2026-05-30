@@ -84,6 +84,7 @@ def autobuy_job_kb(job: AutobuyJob) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle, callback_data=f"ab:toggle:{job.id}")],
         [InlineKeyboardButton(text="⏱ Интервал", callback_data=f"ab:interval:{job.id}")],
+        [InlineKeyboardButton(text="🎯 Лимит", callback_data=f"ab:limit:{job.id}")],
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ab:del:{job.id}")],
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="ab:back")],
     ])

@@ -24,7 +24,7 @@ from .keyboards import (
     refund_confirm_kb,
     services_kb,
 )
-from .states import BuyFlow, IntervalFlow, RefundFlow
+from .states import BuyFlow, IntervalFlow, LimitFlow, RefundFlow
 
 log = logging.getLogger("bot")
 SERVICES_PER_PAGE = 12
@@ -306,6 +306,38 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         job = await db.get_job(int(job_id))
         await m.answer(_job_text(job), reply_markup=autobuy_job_kb(job))
 
+    @r.callback_query(F.data.startswith("ab:limit:"))
+    async def ab_limit(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        job_id = int(c.data.split(":")[2])
+        await state.set_state(LimitFlow.waiting_value)
+        await state.update_data(job_id=job_id)
+        await c.message.answer(
+            "Введи лимит покупок — сколько всего номеров выкупить.\n"
+            "<code>0</code> = без лимита. Например: <code>50</code>"
+        )
+
+    @r.message(LimitFlow.waiting_value)
+    async def ab_limit_set(m: Message, state: FSMContext):
+        try:
+            value = int((m.text or "").strip())
+        except ValueError:
+            await m.answer("Нужно целое число ≥ 0 (0 = без лимита).")
+            return
+        if value < 0 or value > 100000:
+            await m.answer("Нужно число от 0 до 100000.")
+            return
+        data = await state.get_data()
+        job_id = int(data.get("job_id"))
+        await state.clear()
+        await autobuy.set_limit(job_id, value)
+        job = await db.get_job(job_id)
+        note = ""
+        # если лимит снова позволяет покупать, а задание было остановлено — подсказать включить
+        if job and not job.enabled and (value == 0 or job.bought_count < value):
+            note = "\n\nЗадание выключено — нажми «▶️ Включить», чтобы продолжить выкуп."
+        await m.answer(_job_text(job) + note, reply_markup=autobuy_job_kb(job))
+
     # ───────── Service / plan flow shared ─────────
     @r.callback_query(F.data.regexp(r"^(buy|ab):letters$"))
     async def cb_letters(c: CallbackQuery, state: FSMContext):
@@ -568,6 +600,7 @@ def _job_text(job) -> str:
         f"<b>{job.service_name}</b>\n"
         f"План: {job.plan_label}\n"
         f"Интервал: {job.interval_sec} сек\n"
+        f"Лимит: {job.buy_limit if job.buy_limit else '∞'}\n"
         f"Куплено всего: {job.bought_count}\n"
         f"Последний запуск: {job.last_run_at or '—'} ({job.last_status or '—'})\n"
         f"Статус: {flag}"

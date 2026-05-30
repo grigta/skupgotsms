@@ -10,6 +10,10 @@ class IntervalFlow(StatesGroup):
     waiting_value = State()
 
 
+class LimitFlow(StatesGroup):
+    waiting_value = State()
+
+
 class RefundFlow(StatesGroup):
     waiting_list = State()
     confirming = State()

@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS autobuy_jobs (
     service_id TEXT,
     service_name TEXT NOT NULL,
     plan_label TEXT NOT NULL,
-    interval_min INTEGER NOT NULL DEFAULT 5,
+    interval_sec INTEGER NOT NULL DEFAULT 30,
     enabled INTEGER NOT NULL DEFAULT 1,
     bought_count INTEGER NOT NULL DEFAULT 0,
     last_run_at TEXT,
@@ -35,7 +35,7 @@ class AutobuyJob:
     service_id: str | None
     service_name: str
     plan_label: str
-    interval_min: int
+    interval_sec: int
     enabled: bool
     bought_count: int
     last_run_at: str | None
@@ -55,13 +55,18 @@ class DB:
                 cols = {row[1] for row in await cur.fetchall()}
             if "service_id" not in cols:
                 await db.execute("ALTER TABLE autobuy_jobs ADD COLUMN service_id TEXT")
+            # interval_min (minutes) → interval_sec (seconds): add column, seed from old value
+            if "interval_sec" not in cols:
+                await db.execute("ALTER TABLE autobuy_jobs ADD COLUMN interval_sec INTEGER NOT NULL DEFAULT 30")
+                if "interval_min" in cols:
+                    await db.execute("UPDATE autobuy_jobs SET interval_sec = interval_min * 60")
             await db.commit()
 
-    async def add_job(self, plan_id: str, service_id: str, service_name: str, plan_label: str, interval_min: int) -> int:
+    async def add_job(self, plan_id: str, service_id: str, service_name: str, plan_label: str, interval_sec: int) -> int:
         async with aiosqlite.connect(self.path) as db:
             cur = await db.execute(
-                "INSERT INTO autobuy_jobs (plan_id, service_id, service_name, plan_label, interval_min) VALUES (?, ?, ?, ?, ?)",
-                (plan_id, service_id, service_name, plan_label, interval_min),
+                "INSERT INTO autobuy_jobs (plan_id, service_id, service_name, plan_label, interval_sec) VALUES (?, ?, ?, ?, ?)",
+                (plan_id, service_id, service_name, plan_label, interval_sec),
             )
             await db.commit()
             return cur.lastrowid
@@ -72,7 +77,7 @@ class DB:
             await db.commit()
 
     async def list_jobs(self, only_enabled: bool = False) -> list[AutobuyJob]:
-        q = "SELECT id, plan_id, service_id, service_name, plan_label, interval_min, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs"
+        q = "SELECT id, plan_id, service_id, service_name, plan_label, interval_sec, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs"
         if only_enabled:
             q += " WHERE enabled = 1"
         q += " ORDER BY id DESC"
@@ -82,7 +87,7 @@ class DB:
         return [
             AutobuyJob(
                 id=r[0], plan_id=r[1], service_id=r[2], service_name=r[3], plan_label=r[4],
-                interval_min=r[5], enabled=bool(r[6]), bought_count=r[7],
+                interval_sec=r[5], enabled=bool(r[6]), bought_count=r[7],
                 last_run_at=r[8], last_status=r[9],
             )
             for r in rows
@@ -91,7 +96,7 @@ class DB:
     async def get_job(self, job_id: int) -> AutobuyJob | None:
         async with aiosqlite.connect(self.path) as db:
             async with db.execute(
-                "SELECT id, plan_id, service_id, service_name, plan_label, interval_min, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs WHERE id = ?",
+                "SELECT id, plan_id, service_id, service_name, plan_label, interval_sec, enabled, bought_count, last_run_at, last_status FROM autobuy_jobs WHERE id = ?",
                 (job_id,),
             ) as cur:
                 r = await cur.fetchone()
@@ -99,7 +104,7 @@ class DB:
             return None
         return AutobuyJob(
             id=r[0], plan_id=r[1], service_id=r[2], service_name=r[3], plan_label=r[4],
-            interval_min=r[5], enabled=bool(r[6]), bought_count=r[7],
+            interval_sec=r[5], enabled=bool(r[6]), bought_count=r[7],
             last_run_at=r[8], last_status=r[9],
         )
 
@@ -108,9 +113,9 @@ class DB:
             await db.execute("UPDATE autobuy_jobs SET enabled = ? WHERE id = ?", (1 if enabled else 0, job_id))
             await db.commit()
 
-    async def set_interval(self, job_id: int, interval_min: int) -> None:
+    async def set_interval(self, job_id: int, interval_sec: int) -> None:
         async with aiosqlite.connect(self.path) as db:
-            await db.execute("UPDATE autobuy_jobs SET interval_min = ? WHERE id = ?", (interval_min, job_id))
+            await db.execute("UPDATE autobuy_jobs SET interval_sec = ? WHERE id = ?", (interval_sec, job_id))
             await db.commit()
 
     async def delete_job(self, job_id: int) -> None:

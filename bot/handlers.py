@@ -168,7 +168,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         await state.set_state(IntervalFlow.waiting_value)
         await state.update_data(job_id=job_id)
         await c.message.answer(
-            "Введи интервал в минутах (1–1440). Например: <code>5</code>"
+            "Введи интервал в секундах (10–86400). Например: <code>30</code>"
         )
 
     @r.message(IntervalFlow.waiting_value)
@@ -176,10 +176,10 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         try:
             value = int((m.text or "").strip())
         except ValueError:
-            await m.answer("Нужно число от 1 до 1440.")
+            await m.answer("Нужно число от 10 до 86400.")
             return
-        if not 1 <= value <= 1440:
-            await m.answer("Нужно число от 1 до 1440.")
+        if not 10 <= value <= 86400:
+            await m.answer("Нужно число от 10 до 86400.")
             return
         data = await state.get_data()
         job_id = data.get("job_id")
@@ -258,11 +258,11 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 service_id=plan.service_id,
                 service_name=plan.service_name,
                 plan_label=_plan_label(plan),
-                interval_min=settings.default_autobuy_interval_min,
+                interval_sec=settings.default_autobuy_interval_sec,
             )
             await autobuy.enable(job_id)
             job = await db.get_job(job_id)
-            await _safe_edit(c.message, 
+            await _safe_edit(c.message,
                 f"🤖 Автобай создан и запущен.\n\n{_job_text(job)}",
                 reply_markup=autobuy_job_kb(job),
             )
@@ -312,7 +312,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             plan_id=plan.id,
             service_name=plan.service_name,
             plan_label=_plan_label(plan),
-            interval_min=settings.default_autobuy_interval_min,
+            interval_sec=settings.default_autobuy_interval_sec,
         )
         await autobuy.enable(job_id)
         job = await db.get_job(job_id)
@@ -448,7 +448,7 @@ def _job_text(job) -> str:
     return (
         f"<b>{job.service_name}</b>\n"
         f"План: {job.plan_label}\n"
-        f"Интервал: {job.interval_min} мин\n"
+        f"Интервал: {job.interval_sec} сек\n"
         f"Куплено всего: {job.bought_count}\n"
         f"Последний запуск: {job.last_run_at or '—'} ({job.last_status or '—'})\n"
         f"Статус: {flag}"

@@ -41,7 +41,7 @@ class AutobuyManager:
             self.scheduler.remove_job(sid)
         self.scheduler.add_job(
             self._tick,
-            trigger=IntervalTrigger(minutes=job.interval_min),
+            trigger=IntervalTrigger(seconds=max(10, job.interval_sec)),
             id=sid,
             args=[job.id],
             next_run_time=None,
@@ -66,8 +66,8 @@ class AutobuyManager:
         await self.db.set_enabled(job_id, False)
         self._unschedule(job_id)
 
-    async def set_interval(self, job_id: int, interval_min: int) -> None:
-        await self.db.set_interval(job_id, interval_min)
+    async def set_interval(self, job_id: int, interval_sec: int) -> None:
+        await self.db.set_interval(job_id, interval_sec)
         job = await self.db.get_job(job_id)
         if job and job.enabled:
             self._schedule(job)

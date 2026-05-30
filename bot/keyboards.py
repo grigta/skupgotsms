@@ -71,7 +71,7 @@ def autobuy_list_kb(jobs: list[AutobuyJob]) -> InlineKeyboardMarkup:
         flag = "🟢" if j.enabled else "⚪️"
         rows.append([
             InlineKeyboardButton(
-                text=f"{flag} {j.service_name} · {j.plan_label} · {j.interval_min}мин · куплено {j.bought_count}",
+                text=f"{flag} {j.service_name} · {j.plan_label} · {j.interval_sec}с · куплено {j.bought_count}",
                 callback_data=f"ab:open:{j.id}",
             )
         ])

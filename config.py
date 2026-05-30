@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     gotsms_api_token: str
     gotsms_base_url: str = "https://app.gotsms.org"
     db_path: str = "data/skupgotsms.sqlite"
-    default_autobuy_interval_min: int = 5
+    default_autobuy_interval_sec: int = 30
 
     @computed_field  # type: ignore[misc]
     @property

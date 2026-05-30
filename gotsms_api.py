@@ -153,7 +153,8 @@ class GotSmsClient:
                 method, path, resp.status_code, kwargs.get("json"), payload,
             )
             text = str(payload).lower()
-            if "no numbers" in text or "not available" in text or "out of stock" in text:
+            # "No number available for this service." (ед.ч.) и "no numbers" (мн.ч.)
+            if "no number" in text or "not available" in text or "out of stock" in text:
                 raise NoNumbersAvailable(resp.status_code, payload)
             if "balance" in text or "funds" in text or "insufficient" in text:
                 raise InsufficientFunds(resp.status_code, payload)

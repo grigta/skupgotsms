@@ -11,7 +11,7 @@ def main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📨 SMS")],
             [KeyboardButton(text="🛒 Купить номер"), KeyboardButton(text="📱 Мои номера")],
-            [KeyboardButton(text="🤖 Автобай")],
+            [KeyboardButton(text="🤖 Автобай"), KeyboardButton(text="💸 Рефанд")],
         ],
         resize_keyboard=True,
     )
@@ -86,6 +86,13 @@ def autobuy_job_kb(job: AutobuyJob) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⏱ Интервал", callback_data=f"ab:interval:{job.id}")],
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"ab:del:{job.id}")],
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="ab:back")],
+    ])
+
+
+def refund_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Рефандить", callback_data="rf:confirm")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="rf:cancel")],
     ])
 
 

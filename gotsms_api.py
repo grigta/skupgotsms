@@ -286,6 +286,20 @@ class GotSmsClient:
         data = await self._request("GET", "/api/rents", params={"status": status, "per_page": per_page})
         return [self._rent_from(x) for x in data.get("data", [])]
 
+    async def rents_page(self, status: str = "active", page: int = 1, per_page: int = 100) -> tuple[list[Rent], dict]:
+        data = await self._request("GET", "/api/rents", params={"status": status, "page": page, "per_page": per_page})
+        return [self._rent_from(x) for x in data.get("data", [])], data.get("meta", {})
+
+    async def list_rents_all(self, status: str = "active", per_page: int = 100) -> list[Rent]:
+        """All rents of a status across pages (per_page capped at 100 by the API)."""
+        first, meta = await self.rents_page(status=status, page=1, per_page=per_page)
+        last_page = int(meta.get("last_page", 1) or 1)
+        all_rents = list(first)
+        for p in range(2, last_page + 1):
+            items, _ = await self.rents_page(status=status, page=p, per_page=per_page)
+            all_rents.extend(items)
+        return all_rents
+
     async def refund_rent(self, rent_id: str) -> dict:
         return await self._request("POST", f"/api/rents/{rent_id}/refund")
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -19,13 +21,19 @@ from .keyboards import (
     letters_kb,
     main_menu,
     plans_kb,
+    refund_confirm_kb,
     services_kb,
 )
-from .states import BuyFlow, IntervalFlow
+from .states import BuyFlow, IntervalFlow, RefundFlow
 
 log = logging.getLogger("bot")
 SERVICES_PER_PAGE = 12
 PLANS_PER_PAGE = 12
+REFUND_MAX = 500  # safety cap on numbers per request
+
+
+def _digits(s: str) -> str:
+    return re.sub(r"\D", "", s)
 
 
 def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_user_ids: set[int]) -> Router:
@@ -96,6 +104,116 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 f"Код: <b>{sms.code or '—'}</b>\n"
                 f"<i>{sms.body}</i>"
             )
+
+    # ───────── Refund by phone list ─────────
+    @r.message(F.text == "💸 Рефанд")
+    async def refund_start(m: Message, state: FSMContext):
+        await state.clear()
+        await state.set_state(RefundFlow.waiting_list)
+        await m.answer(
+            "💸 Пришли номера для рефанда — <b>по одному на строку</b> "
+            "(можно с +, пробелами, дефисами — формат не важен).\n\n"
+            "Рефанднутся только те, что сейчас в активных арендах.\n"
+            "Отмена — /menu."
+        )
+
+    @r.message(RefundFlow.waiting_list)
+    async def refund_collect(m: Message, state: FSMContext):
+        wanted = [t for t in re.split(r"[\s,;]+", (m.text or "").strip()) if _digits(t)]
+        if not wanted:
+            await m.answer("Не вижу ни одного номера. Пришли список ещё раз или /menu.")
+            return
+        if len(wanted) > REFUND_MAX:
+            await m.answer(f"Слишком много ({len(wanted)}). Максимум {REFUND_MAX} за раз.")
+            return
+
+        await m.answer("⏳ Загружаю активные аренды и сопоставляю…")
+        try:
+            rents = await api.list_rents_all(status="active")
+        except GotSmsError as e:
+            await state.clear()
+            await m.answer(f"Ошибка API {e.status} при загрузке аренд.")
+            return
+
+        # индексируем активные аренды по полным цифрам и по последним 10
+        by_full: dict[str, object] = {}
+        by_last10: dict[str, object] = {}
+        for rt in rents:
+            d = _digits(rt.phone)
+            if not d:
+                continue
+            by_full.setdefault(d, rt)
+            by_last10.setdefault(d[-10:], rt)
+
+        matched: dict[str, object] = {}  # rent_id -> rent (дедуп)
+        not_found: list[str] = []
+        for raw in wanted:
+            d = _digits(raw)
+            rt = by_full.get(d) or (by_last10.get(d[-10:]) if len(d) >= 10 else None)
+            if rt:
+                matched[rt.id] = rt
+            else:
+                not_found.append(raw)
+
+        if not matched:
+            await state.clear()
+            await m.answer(
+                f"Совпадений среди активных аренд нет (проверено {len(wanted)}). "
+                "Возможно, номера уже неактивны."
+            )
+            return
+
+        total = sum(float(rt.price or 0) for rt in matched.values())
+        await state.update_data(rent_ids=list(matched.keys()))
+        await state.set_state(RefundFlow.confirming)
+
+        rows = list(matched.values())
+        preview = "\n".join(f"• <code>{rt.phone}</code> — {rt.service_name}" for rt in rows[:15])
+        more = f"\n…и ещё {len(rows) - 15}" if len(rows) > 15 else ""
+        nf_line = f"\n⚠️ Не найдено среди активных: {len(not_found)}" if not_found else ""
+        await m.answer(
+            f"Найдено <b>{len(matched)}</b> из {len(wanted)} на сумму ~<b>{total:.2f}</b>.{nf_line}\n\n"
+            f"{preview}{more}\n\nРефандить?",
+            reply_markup=refund_confirm_kb(),
+        )
+
+    @r.callback_query(F.data == "rf:cancel")
+    async def refund_cancel(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        await state.clear()
+        await _safe_edit(c.message, "Рефанд отменён.")
+
+    @r.callback_query(F.data == "rf:confirm")
+    async def refund_do(c: CallbackQuery, state: FSMContext):
+        await c.answer("Рефандю…")
+        data = await state.get_data()
+        rent_ids = list(data.get("rent_ids") or [])
+        await state.clear()
+        if not rent_ids:
+            await _safe_edit(c.message, "Список пуст, начни заново.")
+            return
+
+        await _safe_edit(c.message, f"⏳ Рефандю {len(rent_ids)} шт…")
+        ok = 0
+        fail: list[str] = []
+        for rid in rent_ids:
+            try:
+                await api.refund_rent(rid)
+                ok += 1
+            except GotSmsError as e:
+                fail.append(f"{rid[:8]}…: {e.status}")
+            await asyncio.sleep(0.1)  # не долбим API
+
+        try:
+            bal = await api.balance()
+            bal_line = f"\n💰 Баланс: <b>{bal:.2f}</b>"
+        except GotSmsError:
+            bal_line = ""
+
+        msg = f"✅ Рефанднуто: <b>{ok}</b> из {len(rent_ids)}."
+        if fail:
+            msg += f"\n❌ Ошибок: {len(fail)}\n" + "\n".join(f"<code>{f}</code>" for f in fail[:10])
+        await c.message.answer(msg + bal_line)
 
     # ───────── Buy flow (one-shot) ─────────
     @r.message(F.text == "🛒 Купить номер")

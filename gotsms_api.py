@@ -146,6 +146,10 @@ class GotSmsClient:
     async def __aexit__(self, *_):
         await self.aclose()
 
+    def rate_remaining(self) -> int:
+        """Сколько запросов ещё можно сделать в текущем окне (оценка по бюджету)."""
+        return max(0, self._rl_remaining)
+
     async def _gate(self) -> None:
         """Пропускной шлюз: не даём окну уйти в минус, при исчерпании — спим до сброса."""
         async with self._rl_lock:

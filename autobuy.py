@@ -149,14 +149,16 @@ class AutobuyManager:
 
             limit = job.buy_limit  # 0 = без лимита
             already = job.bought_count
-            rung = 0  # ступень в BATCH_LADDER: 100 → 50 → 25 → 1
+            rung = 0          # ступень в BATCH_LADDER (25 → 10 → 1)
+            probed = False    # первый раунд — разведка 1 номером (пустой пул = дёшево выходим)
 
-            # батчевый выкуп с градацией: полный батч держим ступень, на недоборе — ниже
+            # баланс ведём локально (вычитаем цену за купленное), а не дёргаем API каждый раунд
             while balance >= price and (limit == 0 or already + len(bought) < limit):
-                batch = BATCH_LADDER[rung]
-                affordable = int(balance // price)              # сколько потянет баланс
-                room = (limit - already - len(bought)) if limit else affordable  # сколько до лимита
-                n = min(batch, affordable, room)
+                batch = 1 if not probed else BATCH_LADDER[rung]
+                affordable = int(balance // price)                 # потянет баланс
+                room = (limit - already - len(bought)) if limit else affordable  # до лимита
+                budget = self.api.rate_remaining()                 # остаток окна rate-limit
+                n = min(batch, affordable, room, max(1, budget))
                 if n <= 0:
                     if affordable <= 0:
                         status = "insufficient_funds"
@@ -168,12 +170,13 @@ class AutobuyManager:
 
                 for rent in got:
                     bought.append(rent.phone)
+                balance -= price * len(got)
                 if got:
                     sample = "\n".join(f"<code>{r.phone}</code>" for r in got[:50])
                     await self.notify(f"✅ Куплено {len(got)} ({job.service_name}):\n{sample}")
 
                 if not got:
-                    # ничего не купили на этой ступени → пул пуст / лимит провайдера / 429 / ошибка
+                    # ничего не купили → пул пуст / нет средств / ошибка → стоп
                     if "insufficient_funds" in kinds:
                         status = "insufficient_funds"
                     elif "no_numbers" in kinds:
@@ -183,14 +186,10 @@ class AutobuyManager:
                         status = errs[0] if errs else "no_numbers"
                     break
 
-                # купили меньше, чем пытались → пул сдувается, спускаемся ступенью ниже
-                if len(got) < n and rung < len(BATCH_LADDER) - 1:
-                    rung += 1
-
-                try:
-                    balance = await self.api.balance()
-                except GotSmsError:
-                    break
+                if not probed:
+                    probed = True  # разведка удалась → дальше гоним батчами с верхней ступени
+                elif len(got) < n and rung < len(BATCH_LADDER) - 1:
+                    rung += 1      # недобор → ступенью ниже (25→10→1)
 
             await self.db.record_run(job.id, len(bought), status)
             total = already + len(bought)

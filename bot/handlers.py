@@ -26,7 +26,7 @@ from .keyboards import (
     refund_services_kb,
     services_kb,
 )
-from .states import BuyFlow, IntervalFlow, LimitFlow, RefundFlow
+from .states import BuyFlow, IntervalFlow, LimitFlow, LkCookieFlow, RefundFlow
 
 log = logging.getLogger("bot")
 SERVICES_PER_PAGE = 12
@@ -106,6 +106,51 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 f"Код: <b>{sms.code}</b>\n"
                 f"<i>{sms.body}</i>"
             )
+
+    # ───────── ЛК cookie (обновление сессии для bulk-выкупа) ─────────
+    @r.message(Command("lk"))
+    async def lk_start(m: Message, state: FSMContext):
+        if not autobuy.lk:
+            await m.answer("ЛК bulk-выкуп не настроен (нет cookie). Добавь LK_SESSION/LK_XSRF в .env.")
+            return
+        await state.set_state(LkCookieFlow.waiting_session)
+        await m.answer(
+            "🔑 Обновление ЛК-cookie для bulk-выкупа.\n\n"
+            "В Chrome на app.gotsms.org: <b>F12 → Application → Cookies → app.gotsms.org</b>.\n"
+            "Пришли значение <b>gotsms_session</b>:"
+        )
+
+    @r.message(LkCookieFlow.waiting_session)
+    async def lk_session(m: Message, state: FSMContext):
+        val = (m.text or "").strip()
+        if len(val) < 20:
+            await m.answer("Похоже, не то значение. Пришли <b>gotsms_session</b> ещё раз (или /menu).")
+            return
+        await state.update_data(session=val)
+        await state.set_state(LkCookieFlow.waiting_xsrf)
+        await m.answer("Принял. Теперь пришли <b>XSRF-TOKEN</b>:")
+
+    @r.message(LkCookieFlow.waiting_xsrf)
+    async def lk_xsrf(m: Message, state: FSMContext):
+        val = (m.text or "").strip()
+        if len(val) < 20:
+            await m.answer("Похоже, не то значение. Пришли <b>XSRF-TOKEN</b> ещё раз (или /menu).")
+            return
+        data = await state.get_data()
+        session = data.get("session")
+        await state.clear()
+        await db.set_setting("lk_session", session)
+        await db.set_setting("lk_xsrf", val)
+        await autobuy.lk.update_cookies(session, val)
+        try:
+            alive = await autobuy.lk.check_alive()
+        except Exception:
+            alive = False
+        if alive:
+            await m.answer("✅ ЛК-cookie обновлены, сессия жива. Bulk-выкуп работает.")
+        else:
+            await m.answer("⚠️ Cookie сохранены, но сессия не отвечает (протухла/неверны?). "
+                           "Сними свежие и пришли заново через /lk.")
 
     # ───────── Refund by phone list ─────────
     @r.message(F.text == "💸 Рефанд")

@@ -68,10 +68,13 @@ async def main() -> None:
             except Exception as e:
                 log.warning("notify %s failed: %s", uid, e)
 
-    # ЛК-клиент для bulk-покупки (если задан cookie) — снимает лимит 30/мин, до 25/запрос
+    # ЛК-клиент для bulk-покупки. Cookie из БД (обновляется через /lk в боте)
+    # имеет приоритет над .env — чтобы не перезапускать сервис при протухании.
     lk = None
-    if settings.lk_session and settings.lk_xsrf:
-        lk = LkClient(settings.lk_session, settings.lk_xsrf, settings.lk_user_agent, base_url=settings.gotsms_base_url)
+    lk_session = (await db.get_setting("lk_session")) or settings.lk_session
+    lk_xsrf = (await db.get_setting("lk_xsrf")) or settings.lk_xsrf
+    if lk_session and lk_xsrf:
+        lk = LkClient(lk_session, lk_xsrf, settings.lk_user_agent, base_url=settings.gotsms_base_url)
         log.info("LK bulk-buy enabled (cookie session)")
     else:
         log.info("LK bulk-buy disabled (no cookie) — using public API")

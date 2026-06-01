@@ -14,6 +14,11 @@ class LimitFlow(StatesGroup):
     waiting_value = State()
 
 
+class LkCookieFlow(StatesGroup):
+    waiting_session = State()
+    waiting_xsrf = State()
+
+
 class RefundFlow(StatesGroup):
     choosing_service = State()
     waiting_list = State()

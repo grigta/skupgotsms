@@ -132,6 +132,21 @@ class DB:
             await db.execute("DELETE FROM autobuy_jobs WHERE id = ?", (job_id,))
             await db.commit()
 
+    async def get_setting(self, key: str) -> str | None:
+        async with aiosqlite.connect(self.path) as db:
+            async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cur:
+                r = await cur.fetchone()
+        return r[0] if r else None
+
+    async def set_setting(self, key: str, value: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            await db.commit()
+
     async def record_run(self, job_id: int, bought: int, status: str) -> None:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(

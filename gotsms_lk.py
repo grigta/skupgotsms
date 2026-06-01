@@ -49,6 +49,29 @@ class LkClient:
     async def aclose(self) -> None:
         await self._cli.aclose()
 
+    async def update_cookies(self, session_cookie: str, xsrf_cookie: str) -> None:
+        """Заменить cookie-сессию на лету (после ручного обновления через бота)."""
+        await self._cli.aclose()
+        self._cookies = {"gotsms_session": session_cookie, "XSRF-TOKEN": xsrf_cookie}
+        self._cli = httpx.AsyncClient(
+            base_url=self.base, cookies=self._cookies,
+            headers={"User-Agent": self._ua}, timeout=40.0, follow_redirects=False,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+        )
+        self._csrf = None
+        self._uri = None
+        self._modal_snapshot = None  # форс rebootstrap на следующей покупке
+
+    async def check_alive(self) -> bool:
+        """Жива ли сессия (проверка после обновления cookie)."""
+        try:
+            await self.bootstrap()
+            return True
+        except LkAuthError:
+            return False
+        except LkError:
+            return True  # сессия жива, просто другая ошибка
+
     # ───────── helpers ─────────
     @staticmethod
     def _snapshots(doc: str) -> list[tuple[str, str, dict]]:

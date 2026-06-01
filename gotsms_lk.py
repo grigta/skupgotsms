@@ -122,38 +122,60 @@ class LkClient:
         return r.json()
 
     # ───────── bulk buy ─────────
-    async def buy(self, plan_id: str, quantity: int) -> tuple[int, str]:
-        """Купить `quantity` (≤25) номеров плана одним запросом.
-        Возвращает (куплено, статус: ok|no_numbers|insufficient_funds|err)."""
+    @staticmethod
+    def _available_count(data: dict) -> int:
+        """Сумма доступных номеров по area-кодам (0 = пул пуст)."""
+        total = 0
+
+        def walk(x):
+            nonlocal total
+            if isinstance(x, dict):
+                c = x.get("count")
+                if isinstance(c, int):
+                    total += c
+                for v in x.values():
+                    walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    walk(v)
+        walk(data.get("availableAreaCodes"))
+        return total
+
+    async def probe(self, plan_id: str) -> tuple[str | None, int]:
+        """Дёшево (~0.8с, openModal) узнать наличие номеров плана.
+        Возвращает (snapshot модалки, кол-во доступных). Пустой пул → (snapshot, 0).
+        Snapshot можно сразу передать в `rent` для немедленного выкупа."""
         if not self._modal_snapshot:
             await self.bootstrap()
-        qty = max(1, min(quantity, MAX_PER_RENT))
-
-        # 1) открыть модалку → получить snapshot area-code-rent-modal
         open_resp = await self._post([{
             "snapshot": self._modal_snapshot, "updates": {},
             "calls": [{"path": "", "method": "__dispatch",
                        "params": ["openModal", {"component": MODAL, "arguments": {"planId": plan_id}}]}],
         }])
-        host = open_resp["components"][0]
-        # НЕ мутируем self._modal_snapshot: начальный (закрытая модалка) snapshot
-        # валиден для каждого openModal. Снапшот из ответа = "открытое" состояние,
-        # переиспользовать его для след. openModal нельзя (модалка уже открыта).
-        eff_html = host.get("effects", {}).get("html", "")
+        eff_html = open_resp["components"][0].get("effects", {}).get("html", "")
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:
-            raise LkError("модалка не отрисовалась (нет area-code snapshot)")
+            return None, 0
         modal_raw, modal_s = modal
-        max_q = int(modal_s["data"].get("maxQuantity") or MAX_PER_RENT)
-        qty = min(qty, max_q)
+        return modal_raw, self._available_count(modal_s["data"])
 
-        # 2) set quantity + rent
+    async def rent(self, modal_raw: str, qty: int) -> tuple[int, str]:
+        """Выкуп по уже полученному snapshot модалки (из probe)."""
+        qty = max(1, min(qty, MAX_PER_RENT))
         buy_resp = await self._post([{
             "snapshot": modal_raw,
             "updates": {"selectedAreaCode": "", "quantity": qty},
             "calls": [{"path": "", "method": "rent", "params": []}],
         }])
         return self._parse_rent(buy_resp)
+
+    async def buy(self, plan_id: str, quantity: int) -> tuple[int, str]:
+        """Купить до `quantity` (≤25) номеров. Сначала probe (0.8с): если пул
+        пуст — мгновенно no_numbers (не висим 21с на пустом rent)."""
+        modal_raw, available = await self.probe(plan_id)
+        if not modal_raw or available <= 0:
+            return 0, "no_numbers"
+        return await self.rent(modal_raw, min(quantity, available, MAX_PER_RENT))
 
     @staticmethod
     def _parse_rent(resp: dict) -> tuple[int, str]:

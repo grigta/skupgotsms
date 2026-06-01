@@ -378,7 +378,8 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         await state.set_state(IntervalFlow.waiting_value)
         await state.update_data(job_id=job_id)
         await c.message.answer(
-            "Введи интервал в секундах (10–86400). Например: <code>30</code>"
+            "Введи интервал в секундах (1–86400). Для near-realtime охоты ставь "
+            "<code>1</code>–<code>2</code>. Например: <code>2</code>"
         )
 
     @r.message(IntervalFlow.waiting_value)
@@ -386,10 +387,10 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         try:
             value = int((m.text or "").strip())
         except ValueError:
-            await m.answer("Нужно число от 10 до 86400.")
+            await m.answer("Нужно число от 1 до 86400.")
             return
-        if not 10 <= value <= 86400:
-            await m.answer("Нужно число от 10 до 86400.")
+        if not 1 <= value <= 86400:
+            await m.answer("Нужно число от 1 до 86400.")
             return
         data = await state.get_data()
         job_id = data.get("job_id")

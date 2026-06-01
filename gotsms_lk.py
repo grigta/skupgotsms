@@ -147,3 +147,53 @@ class LkClient:
         if "rented" in txt and "success" in txt:
             return 0, "ok"
         return 0, "err"
+
+
+class LkPool:
+    """Пул ЛК-аккаунтов. Сервер gotsms сериализует покупки ОДНОГО аккаунта
+    (lock на балансе) и ограничивает 25/запрос — потолок ~74 номера/мин на
+    аккаунт. Несколько аккаунтов работают параллельно (каждый свой lock),
+    скорости складываются: N аккаунтов ≈ N×74/мин."""
+
+    def __init__(self, accounts: list[dict], user_agent: str, base_url: str = "https://app.gotsms.org"):
+        # accounts: [{"session": "...", "xsrf": "..."}, ...]
+        self.clients = [LkClient(a["session"], a["xsrf"], user_agent, base_url) for a in accounts]
+
+    async def aclose(self) -> None:
+        for c in self.clients:
+            await c.aclose()
+
+    @property
+    def size(self) -> int:
+        return len(self.clients)
+
+    async def _drain_one(self, cli: LkClient, plan_id: str, target: int, price: float, balances: dict, idx: int) -> int:
+        """Один аккаунт последовательно выкупает по 25, пока не возьмёт `target`
+        или пул/баланс не иссякнут. Баланс аккаунта ведём в balances[idx]."""
+        bought = 0
+        while bought < target:
+            n = min(25, target - bought)
+            if price > 0 and balances.get(idx, 1e9) < price:
+                break
+            try:
+                cnt, st = await cli.buy(plan_id, n)
+            except (LkAuthError, LkError) as e:
+                log.warning("pool acct#%d: %s", idx, e)
+                break
+            if cnt <= 0:
+                break  # no_numbers / insufficient
+            bought += cnt
+            if price > 0 and idx in balances:
+                balances[idx] -= price * cnt
+        return bought
+
+    async def buy_bulk(self, plan_id: str, total: int, price: float = 0.0, balances: dict | None = None) -> int:
+        """Выкупить до `total` номеров плана, раскидав работу по аккаунтам
+        ПАРАЛЛЕЛЬНО. Возвращает фактически купленное."""
+        if not self.clients:
+            return 0
+        balances = balances or {}
+        share = max(1, -(-total // len(self.clients)))  # ceil
+        tasks = [self._drain_one(c, plan_id, share, price, balances, i) for i, c in enumerate(self.clients)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return sum(r for r in results if isinstance(r, int))

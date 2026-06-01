@@ -9,6 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db import DB, AutobuyJob
 from gotsms_api import GotSmsClient, GotSmsError, NoNumbersAvailable, InsufficientFunds
+from gotsms_lk import LkClient, LkAuthError, LkError
 
 log = logging.getLogger("autobuy")
 
@@ -22,10 +23,11 @@ NotifyFn = Callable[[str], Awaitable[None]]
 
 
 class AutobuyManager:
-    def __init__(self, db: DB, api: GotSmsClient, notify: NotifyFn):
+    def __init__(self, db: DB, api: GotSmsClient, notify: NotifyFn, lk: LkClient | None = None):
         self.db = db
         self.api = api
         self.notify = notify
+        self.lk = lk  # ЛК-клиент для bulk-покупки (None = только публичный API)
         self.scheduler = AsyncIOScheduler()
         self._lock = asyncio.Lock()
 
@@ -149,47 +151,77 @@ class AutobuyManager:
 
             limit = job.buy_limit  # 0 = без лимита
             already = job.bought_count
-            rung = 0          # ступень в BATCH_LADDER (25 → 10 → 1)
-            probed = False    # первый раунд — разведка 1 номером (пустой пул = дёшево выходим)
 
-            # баланс ведём локально (вычитаем цену за купленное), а не дёргаем API каждый раунд
-            while balance >= price and (limit == 0 or already + len(bought) < limit):
-                batch = 1 if not probed else BATCH_LADDER[rung]
-                affordable = int(balance // price)                 # потянет баланс
-                room = (limit - already - len(bought)) if limit else affordable  # до лимита
-                budget = self.api.rate_remaining()                 # остаток окна rate-limit
-                n = min(batch, affordable, room, max(1, budget))
-                if n <= 0:
-                    if affordable <= 0:
-                        status = "insufficient_funds"
-                    break
+            if self.lk:
+                # ── bulk-выкуп пачками по 25 через ЛК (Livewire, без лимита 30/мин) ──
+                while balance >= price and (limit == 0 or already + len(bought) < limit):
+                    room = (limit - already - len(bought)) if limit else 25
+                    n = min(25, int(balance // price), room)
+                    if n <= 0:
+                        if int(balance // price) <= 0:
+                            status = "insufficient_funds"
+                        break
+                    try:
+                        cnt, st = await self.lk.buy(job.plan_id, n)
+                    except LkAuthError:
+                        status = "lk_auth"
+                        await self.notify(
+                            f"⛔ Автобай <b>{job.service_name}</b>: ЛК-сессия протухла — "
+                            f"обнови cookie (bulk-выкуп остановлен)"
+                        )
+                        break
+                    except LkError as e:
+                        status = "lk_err"
+                        log.warning("lk buy failed: %s", e)
+                        break
+                    if cnt <= 0:
+                        status = st  # no_numbers / insufficient_funds / err
+                        break
+                    bought.extend(["lk"] * cnt)
+                    balance -= price * cnt
+                    await self.notify(
+                        f"✅ Куплено {cnt} пачкой ({job.service_name}). Остаток: {balance:.2f}"
+                    )
+            else:
+                # ── fallback: публичный API по 1, батчами с лесенкой под лимит 30/мин ──
+                rung = 0          # ступень в BATCH_LADDER (25 → 10 → 1)
+                probed = False    # первый раунд — разведка 1 номером
+                while balance >= price and (limit == 0 or already + len(bought) < limit):
+                    batch = 1 if not probed else BATCH_LADDER[rung]
+                    affordable = int(balance // price)
+                    room = (limit - already - len(bought)) if limit else affordable
+                    budget = self.api.rate_remaining()
+                    n = min(batch, affordable, room, max(1, budget))
+                    if n <= 0:
+                        if affordable <= 0:
+                            status = "insufficient_funds"
+                        break
 
-                results = await asyncio.gather(*[self._buy_one(job.plan_id) for _ in range(n)])
-                kinds = [s for (s, _) in results]
-                got = [r for (s, r) in results if s == "ok" and r is not None]
+                    results = await asyncio.gather(*[self._buy_one(job.plan_id) for _ in range(n)])
+                    kinds = [s for (s, _) in results]
+                    got = [r for (s, r) in results if s == "ok" and r is not None]
 
-                for rent in got:
-                    bought.append(rent.phone)
-                balance -= price * len(got)
-                if got:
-                    sample = "\n".join(f"<code>{r.phone}</code>" for r in got[:50])
-                    await self.notify(f"✅ Куплено {len(got)} ({job.service_name}):\n{sample}")
+                    for rent in got:
+                        bought.append(rent.phone)
+                    balance -= price * len(got)
+                    if got:
+                        sample = "\n".join(f"<code>{r.phone}</code>" for r in got[:50])
+                        await self.notify(f"✅ Куплено {len(got)} ({job.service_name}):\n{sample}")
 
-                if not got:
-                    # ничего не купили → пул пуст / нет средств / ошибка → стоп
-                    if "insufficient_funds" in kinds:
-                        status = "insufficient_funds"
-                    elif "no_numbers" in kinds:
-                        status = "no_numbers"
-                    else:
-                        errs = [s for s in kinds if s.startswith("err:")]
-                        status = errs[0] if errs else "no_numbers"
-                    break
+                    if not got:
+                        if "insufficient_funds" in kinds:
+                            status = "insufficient_funds"
+                        elif "no_numbers" in kinds:
+                            status = "no_numbers"
+                        else:
+                            errs = [s for s in kinds if s.startswith("err:")]
+                            status = errs[0] if errs else "no_numbers"
+                        break
 
-                if not probed:
-                    probed = True  # разведка удалась → дальше гоним батчами с верхней ступени
-                elif len(got) < n and rung < len(BATCH_LADDER) - 1:
-                    rung += 1      # недобор → ступенью ниже (25→10→1)
+                    if not probed:
+                        probed = True
+                    elif len(got) < n and rung < len(BATCH_LADDER) - 1:
+                        rung += 1
 
             await self.db.record_run(job.id, len(bought), status)
             total = already + len(bought)

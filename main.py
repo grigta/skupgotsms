@@ -13,6 +13,7 @@ from bot.handlers import build_router
 from config import settings
 from db import DB
 from gotsms_api import GotSmsClient
+from gotsms_lk import LkClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +68,15 @@ async def main() -> None:
             except Exception as e:
                 log.warning("notify %s failed: %s", uid, e)
 
-    autobuy = AutobuyManager(db=db, api=api, notify=notify)
+    # ЛК-клиент для bulk-покупки (если задан cookie) — снимает лимит 30/мин, до 25/запрос
+    lk = None
+    if settings.lk_session and settings.lk_xsrf:
+        lk = LkClient(settings.lk_session, settings.lk_xsrf, settings.lk_user_agent, base_url=settings.gotsms_base_url)
+        log.info("LK bulk-buy enabled (cookie session)")
+    else:
+        log.info("LK bulk-buy disabled (no cookie) — using public API")
+
+    autobuy = AutobuyManager(db=db, api=api, notify=notify, lk=lk)
     autobuy.start()
     await autobuy.restore()
 
@@ -90,6 +99,8 @@ async def main() -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await api.aclose()
+        if lk:
+            await lk.aclose()
         await bot.session.close()
 
 

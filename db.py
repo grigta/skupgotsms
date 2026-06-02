@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
@@ -146,6 +147,30 @@ class DB:
                 (key, value),
             )
             await db.commit()
+
+    # ───────── ЛК-аккаунты (пул cookie с переключением) ─────────
+    async def lk_accounts(self) -> list[dict]:
+        raw = await self.get_setting("lk_accounts")
+        try:
+            return json.loads(raw) if raw else []
+        except Exception:
+            return []
+
+    async def lk_save_accounts(self, accounts: list[dict]) -> None:
+        await self.set_setting("lk_accounts", json.dumps(accounts, ensure_ascii=False))
+
+    async def lk_active_idx(self) -> int:
+        raw = await self.get_setting("lk_active")
+        return int(raw) if raw and raw.lstrip("-").isdigit() else 0
+
+    async def lk_set_active(self, idx: int) -> None:
+        await self.set_setting("lk_active", str(idx))
+
+    async def lk_add_account(self, label: str, session: str, xsrf: str) -> int:
+        accts = await self.lk_accounts()
+        accts.append({"label": label, "session": session, "xsrf": xsrf})
+        await self.lk_save_accounts(accts)
+        return len(accts) - 1
 
     async def record_run(self, job_id: int, bought: int, status: str) -> None:
         async with aiosqlite.connect(self.path) as db:

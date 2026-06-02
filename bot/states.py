@@ -15,6 +15,7 @@ class LimitFlow(StatesGroup):
 
 
 class LkCookieFlow(StatesGroup):
+    waiting_label = State()
     waiting_session = State()
     waiting_xsrf = State()
 

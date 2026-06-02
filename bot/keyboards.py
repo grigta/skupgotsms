@@ -90,6 +90,18 @@ def autobuy_job_kb(job: AutobuyJob) -> InlineKeyboardMarkup:
     ])
 
 
+def lk_accounts_kb(accounts: list[dict], active: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for i, a in enumerate(accounts):
+        mark = "✅ " if i == active else "▫️ "
+        rows.append([
+            InlineKeyboardButton(text=f"{mark}{a.get('label', f'acc{i}')}", callback_data=f"lk:use:{i}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"lk:del:{i}"),
+        ])
+    rows.append([InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="lk:add")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def refund_services_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="🌐 Все сервисы", callback_data="rf:svc:all")]

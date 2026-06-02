@@ -68,14 +68,24 @@ async def main() -> None:
             except Exception as e:
                 log.warning("notify %s failed: %s", uid, e)
 
-    # ЛК-клиент для bulk-покупки. Cookie из БД (обновляется через /lk в боте)
-    # имеет приоритет над .env — чтобы не перезапускать сервис при протухании.
+    # ЛК-клиент для bulk-покупки. Аккаунты (cookie) хранятся в БД списком с
+    # выбором активного — переключение через /lk в боте, без рестарта.
     lk = None
-    lk_session = (await db.get_setting("lk_session")) or settings.lk_session
-    lk_xsrf = (await db.get_setting("lk_xsrf")) or settings.lk_xsrf
-    if lk_session and lk_xsrf:
-        lk = LkClient(lk_session, lk_xsrf, settings.lk_user_agent, base_url=settings.gotsms_base_url)
-        log.info("LK bulk-buy enabled (cookie session)")
+    accounts = await db.lk_accounts()
+    # миграция: одиночная cookie (старый формат / .env) → первый аккаунт списка
+    if not accounts:
+        s = (await db.get_setting("lk_session")) or settings.lk_session
+        x = (await db.get_setting("lk_xsrf")) or settings.lk_xsrf
+        if s and x:
+            await db.lk_add_account("acc1", s, x)
+            accounts = await db.lk_accounts()
+    if accounts:
+        idx = await db.lk_active_idx()
+        if not (0 <= idx < len(accounts)):
+            idx = 0
+        a = accounts[idx]
+        lk = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
+        log.info("LK bulk-buy enabled (account: %s, всего %d)", a.get("label"), len(accounts))
     else:
         log.info("LK bulk-buy disabled (no cookie) — using public API")
 

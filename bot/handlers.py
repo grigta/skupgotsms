@@ -20,6 +20,7 @@ from .keyboards import (
     autobuy_list_kb,
     confirm_buy_kb,
     letters_kb,
+    lk_accounts_kb,
     main_menu,
     plans_kb,
     refund_confirm_kb,
@@ -107,17 +108,80 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 f"<i>{sms.body}</i>"
             )
 
-    # ───────── ЛК cookie (обновление сессии для bulk-выкупа) ─────────
+    # ───────── ЛК-аккаунты (пул cookie с переключением) ─────────
+    async def _switch_lk(idx: int) -> bool:
+        """Сделать аккаунт idx активным: обновить клиент + проверить сессию."""
+        accts = await db.lk_accounts()
+        if not (0 <= idx < len(accts)):
+            return False
+        a = accts[idx]
+        await db.lk_set_active(idx)
+        if autobuy.lk:
+            await autobuy.lk.update_cookies(a["session"], a["xsrf"])
+        else:
+            from gotsms_lk import LkClient
+            from config import settings
+            autobuy.lk = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
+        try:
+            return await autobuy.lk.check_alive()
+        except Exception:
+            return False
+
     @r.message(Command("lk"))
-    async def lk_start(m: Message, state: FSMContext):
-        if not autobuy.lk:
-            await m.answer("ЛК bulk-выкуп не настроен (нет cookie). Добавь LK_SESSION/LK_XSRF в .env.")
+    async def lk_menu(m: Message, state: FSMContext):
+        await state.clear()
+        accts = await db.lk_accounts()
+        if not accts:
+            await state.set_state(LkCookieFlow.waiting_label)
+            await m.answer("🔑 Аккаунтов ЛК пока нет. Добавим первый.\nВведи <b>метку</b> (имя аккаунта):")
             return
+        active = await db.lk_active_idx()
+        await m.answer("🔑 ЛК-аккаунты для bulk-выкупа (✅ активный):",
+                       reply_markup=lk_accounts_kb(accts, active))
+
+    @r.callback_query(F.data == "lk:add")
+    async def lk_add(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        await state.set_state(LkCookieFlow.waiting_label)
+        await c.message.answer("Введи <b>метку</b> нового аккаунта (любое имя):")
+
+    @r.callback_query(F.data.startswith("lk:use:"))
+    async def lk_use(c: CallbackQuery):
+        await c.answer("Переключаю…")
+        idx = int(c.data.split(":")[2])
+        alive = await _switch_lk(idx)
+        accts = await db.lk_accounts()
+        label = accts[idx].get("label", f"acc{idx}") if 0 <= idx < len(accts) else "?"
+        status = "✅ активна" if alive else "⚠️ не отвечает (протухла?)"
+        await _safe_edit(c.message,
+            f"Активный аккаунт: <b>{label}</b> — сессия {status}.",
+            reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
+
+    @r.callback_query(F.data.startswith("lk:del:"))
+    async def lk_del(c: CallbackQuery):
+        await c.answer()
+        idx = int(c.data.split(":")[2])
+        accts = await db.lk_accounts()
+        if 0 <= idx < len(accts):
+            accts.pop(idx)
+            await db.lk_save_accounts(accts)
+            active = await db.lk_active_idx()
+            if active >= len(accts):
+                await db.lk_set_active(max(0, len(accts) - 1))
+        accts = await db.lk_accounts()
+        if accts:
+            await _safe_edit(c.message, "🔑 ЛК-аккаунты:", reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
+        else:
+            await _safe_edit(c.message, "Аккаунтов нет. Добавь через /lk.")
+
+    @r.message(LkCookieFlow.waiting_label)
+    async def lk_label(m: Message, state: FSMContext):
+        label = (m.text or "").strip()[:30] or "acc"
+        await state.update_data(label=label)
         await state.set_state(LkCookieFlow.waiting_session)
         await m.answer(
-            "🔑 Обновление ЛК-cookie для bulk-выкупа.\n\n"
-            "В Chrome на app.gotsms.org: <b>F12 → Application → Cookies → app.gotsms.org</b>.\n"
-            "Пришли значение <b>gotsms_session</b>:"
+            f"Метка: <b>{label}</b>.\n\nТеперь cookie: в Chrome на app.gotsms.org "
+            "<b>F12 → Application → Cookies</b>.\nПришли <b>gotsms_session</b>:"
         )
 
     @r.message(LkCookieFlow.waiting_session)
@@ -137,20 +201,13 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await m.answer("Похоже, не то значение. Пришли <b>XSRF-TOKEN</b> ещё раз (или /menu).")
             return
         data = await state.get_data()
-        session = data.get("session")
         await state.clear()
-        await db.set_setting("lk_session", session)
-        await db.set_setting("lk_xsrf", val)
-        await autobuy.lk.update_cookies(session, val)
-        try:
-            alive = await autobuy.lk.check_alive()
-        except Exception:
-            alive = False
-        if alive:
-            await m.answer("✅ ЛК-cookie обновлены, сессия жива. Bulk-выкуп работает.")
-        else:
-            await m.answer("⚠️ Cookie сохранены, но сессия не отвечает (протухла/неверны?). "
-                           "Сними свежие и пришли заново через /lk.")
+        idx = await db.lk_add_account(data.get("label", "acc"), data.get("session"), val)
+        alive = await _switch_lk(idx)  # сразу делаем активным
+        accts = await db.lk_accounts()
+        status = "✅ сессия жива, активна" if alive else "⚠️ сессия не отвечает (проверь cookie)"
+        await m.answer(f"Аккаунт <b>{data.get('label')}</b> добавлен — {status}.",
+                       reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
 
     # ───────── Refund by phone list ─────────
     @r.message(F.text == "💸 Рефанд")

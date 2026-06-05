@@ -72,6 +72,34 @@ class LkClient:
         except LkError:
             return True  # сессия жива, просто другая ошибка
 
+    async def balance(self) -> float | None:
+        """Баланс аккаунта (через Livewire-компонент landing.balance).
+        None — сессия мертва / не удалось получить."""
+        try:
+            r = await self._cli.get("/rents/create")
+        except Exception:
+            return None
+        if r.status_code != 200:
+            return None
+        doc = r.text
+        m = re.search(r"window\.livewireScriptConfig\s*=\s*(\{.*?\})\s*;", doc)
+        if not m:
+            return None
+        cfg = json.loads(m.group(1))
+        csrf = cfg["csrf"]
+        uri = cfg["uri"].replace(self.base, "")
+        bsnap = next((raw for (n, raw, s) in self._snapshots(doc) if n == "landing.balance"), None)
+        if not bsnap:
+            return None
+        try:
+            resp = await self._cli.post(uri, json={"_token": csrf, "components": [{
+                "snapshot": bsnap, "updates": {}, "calls": [{"path": "", "method": "$refresh", "params": []}]}]},
+                headers={"X-Livewire": "true", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf})
+            nums = re.findall(r"([0-9]+\.[0-9]+)", resp.text)
+            return float(nums[0]) if nums else None
+        except Exception:
+            return None
+
     # ───────── helpers ─────────
     @staticmethod
     def _snapshots(doc: str) -> list[tuple[str, str, dict]]:

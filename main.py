@@ -68,17 +68,10 @@ async def main() -> None:
             except Exception as e:
                 log.warning("notify %s failed: %s", uid, e)
 
-    # ЛК-клиент для bulk-покупки. Аккаунты (cookie) хранятся в БД списком с
-    # выбором активного — переключение через /lk в боте, без рестарта.
+    # ЛК-клиент для bulk-покупки. Аккаунты (cookie) — ТОЛЬКО через /lk в боте
+    # (хранятся в БД списком с выбором активного). Никаких .env/миграций.
     lk = None
     accounts = await db.lk_accounts()
-    # миграция: одиночная cookie (старый формат / .env) → первый аккаунт списка
-    if not accounts:
-        s = (await db.get_setting("lk_session")) or settings.lk_session
-        x = (await db.get_setting("lk_xsrf")) or settings.lk_xsrf
-        if s and x:
-            await db.lk_add_account("acc1", s, x)
-            accounts = await db.lk_accounts()
     if accounts:
         idx = await db.lk_active_idx()
         if not (0 <= idx < len(accounts)):
@@ -87,7 +80,7 @@ async def main() -> None:
         lk = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
         log.info("LK bulk-buy enabled (account: %s, всего %d)", a.get("label"), len(accounts))
     else:
-        log.info("LK bulk-buy disabled (no cookie) — using public API")
+        log.info("LK bulk-buy disabled — добавь аккаунт через /lk (иначе публичный API)")
 
     autobuy = AutobuyManager(db=db, api=api, notify=notify, lk=lk)
     autobuy.start()

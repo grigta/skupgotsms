@@ -14,11 +14,8 @@ class Settings(BaseSettings):
     db_path: str = "data/skupgotsms.sqlite"
     default_autobuy_interval_sec: int = 30
 
-    # ЛК-сессия для bulk-покупки через Livewire (gotsms_lk). Опционально:
-    # если заданы — автобай покупает пачкой по 25 (быстро, без лимита 30/мин),
-    # иначе fallback на публичный API по 1.
-    lk_session: str = ""           # cookie gotsms_session
-    lk_xsrf: str = ""              # cookie XSRF-TOKEN
+    # ЛК-аккаунты для bulk-покупки добавляются ТОЛЬКО через /lk в боте
+    # (хранятся в БД). Здесь — только User-Agent для cookie-сессий.
     lk_user_agent: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 
     @computed_field  # type: ignore[misc]

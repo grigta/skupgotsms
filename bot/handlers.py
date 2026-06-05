@@ -127,6 +127,24 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         except Exception:
             return False
 
+    async def _lk_menu_text(accts: list[dict], active: int) -> str:
+        """Список аккаунтов с балансом и статусом сессии (статистика через ЛК)."""
+        from gotsms_lk import LkClient
+        from config import settings
+        lines = ["🔑 <b>ЛК-аккаунты</b> (✅ активный, ▫️ остальные):\n"]
+        for i, a in enumerate(accts):
+            mark = "✅" if i == active else "▫️"
+            cli = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
+            try:
+                bal = await cli.balance()
+            except Exception:
+                bal = None
+            finally:
+                await cli.aclose()
+            stat = f"${bal:.2f}" if bal is not None else "⚠️ сессия мертва (обнови)"
+            lines.append(f"{mark} <b>{a.get('label', f'acc{i}')}</b> — {stat}")
+        return "\n".join(lines)
+
     @r.message(Command("lk"))
     async def lk_menu(m: Message, state: FSMContext):
         await state.clear()
@@ -136,8 +154,9 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await m.answer("🔑 Аккаунтов ЛК пока нет. Добавим первый.\nВведи <b>метку</b> (имя аккаунта):")
             return
         active = await db.lk_active_idx()
-        await m.answer("🔑 ЛК-аккаунты для bulk-выкупа (✅ активный):",
-                       reply_markup=lk_accounts_kb(accts, active))
+        msg = await m.answer("⏳ Проверяю аккаунты…")
+        text = await _lk_menu_text(accts, active)
+        await _safe_edit(msg, text, reply_markup=lk_accounts_kb(accts, active))
 
     @r.callback_query(F.data == "lk:add")
     async def lk_add(c: CallbackQuery, state: FSMContext):
@@ -149,13 +168,10 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
     async def lk_use(c: CallbackQuery):
         await c.answer("Переключаю…")
         idx = int(c.data.split(":")[2])
-        alive = await _switch_lk(idx)
+        await _switch_lk(idx)
         accts = await db.lk_accounts()
-        label = accts[idx].get("label", f"acc{idx}") if 0 <= idx < len(accts) else "?"
-        status = "✅ активна" if alive else "⚠️ не отвечает (протухла?)"
-        await _safe_edit(c.message,
-            f"Активный аккаунт: <b>{label}</b> — сессия {status}.",
-            reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
+        active = await db.lk_active_idx()
+        await _safe_edit(c.message, await _lk_menu_text(accts, active), reply_markup=lk_accounts_kb(accts, active))
 
     @r.callback_query(F.data.startswith("lk:del:"))
     async def lk_del(c: CallbackQuery):
@@ -169,10 +185,15 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             if active >= len(accts):
                 await db.lk_set_active(max(0, len(accts) - 1))
         accts = await db.lk_accounts()
-        if accts:
-            await _safe_edit(c.message, "🔑 ЛК-аккаунты:", reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
-        else:
-            await _safe_edit(c.message, "Аккаунтов нет. Добавь через /lk.")
+        if not accts:
+            # аккаунтов не осталось → выключаем bulk
+            if autobuy.lk:
+                await autobuy.lk.aclose()
+                autobuy.lk = None
+            await _safe_edit(c.message, "Аккаунтов нет. Bulk выключен. Добавь через /lk.")
+            return
+        await _safe_edit(c.message, await _lk_menu_text(accts, await db.lk_active_idx()),
+                         reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
 
     @r.message(LkCookieFlow.waiting_label)
     async def lk_label(m: Message, state: FSMContext):

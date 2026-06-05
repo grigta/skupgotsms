@@ -116,12 +116,16 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             return False
         a = accts[idx]
         await db.lk_set_active(idx)
+        was_none = autobuy.lk is None
         if autobuy.lk:
             await autobuy.lk.update_cookies(a["session"], a["xsrf"])
         else:
             from gotsms_lk import LkClient
             from config import settings
             autobuy.lk = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
+        if was_none:
+            # первый аккаунт появился → перевести задания на hunter-режим
+            await autobuy.restart_jobs()
         try:
             return await autobuy.lk.check_alive()
         except Exception:
@@ -186,11 +190,12 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
                 await db.lk_set_active(max(0, len(accts) - 1))
         accts = await db.lk_accounts()
         if not accts:
-            # аккаунтов не осталось → выключаем bulk
+            # аккаунтов не осталось → выключаем bulk, задания на публичный API
             if autobuy.lk:
                 await autobuy.lk.aclose()
                 autobuy.lk = None
-            await _safe_edit(c.message, "Аккаунтов нет. Bulk выключен. Добавь через /lk.")
+            await autobuy.restart_jobs()
+            await _safe_edit(c.message, "Аккаунтов нет. Bulk выключен (задания на публичном API). Добавь через /lk.")
             return
         await _safe_edit(c.message, await _lk_menu_text(accts, await db.lk_active_idx()),
                          reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))

@@ -39,6 +39,14 @@ class AutobuyManager:
         for job in await self.db.list_jobs(only_enabled=True):
             self._start_job(job)
 
+    async def restart_jobs(self) -> None:
+        """Перезапустить все включённые задания на текущем механизме
+        (hunter-loop если есть ЛК, иначе scheduler). Вызывается после
+        добавления/удаления первого ЛК-аккаунта через /lk."""
+        for job in await self.db.list_jobs(only_enabled=True):
+            self._stop_job(job.id)
+            self._start_job(job)
+
     # ───────── управление job: LK → hunter-loop, иначе scheduler ─────────
     def _start_job(self, job: AutobuyJob) -> None:
         if self.lk:

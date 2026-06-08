@@ -90,6 +90,31 @@ def autobuy_job_kb(job: AutobuyJob) -> InlineKeyboardMarkup:
     ])
 
 
+def my_numbers_services_kb(services: list[tuple[str, int]]) -> InlineKeyboardMarkup:
+    """Выбор сервиса для просмотра моих номеров (idx-based callback)."""
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🌐 Все номера", callback_data="mn:svc:a")]
+    ]
+    for i, (name, cnt) in enumerate(services):
+        rows.append([InlineKeyboardButton(text=f"{name} · {cnt}", callback_data=f"mn:svc:{i}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def my_numbers_nav_kb(sel: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Перелистывание страниц номеров (◀️ ▶️ + назад к сервисам)."""
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"mn:pg:{sel}:{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="mn:noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"mn:pg:{sel}:{page + 1}"))
+    rows: list[list[InlineKeyboardButton]] = []
+    if len(nav) > 1:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ К сервисам", callback_data="mn:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def lk_accounts_kb(accounts: list[dict], active: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for i, a in enumerate(accounts):

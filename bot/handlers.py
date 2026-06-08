@@ -22,6 +22,8 @@ from .keyboards import (
     letters_kb,
     lk_accounts_kb,
     main_menu,
+    my_numbers_nav_kb,
+    my_numbers_services_kb,
     plans_kb,
     refund_confirm_kb,
     refund_services_kb,
@@ -73,21 +75,87 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         except GotSmsError as e:
             await m.answer(f"Ошибка API {e.status}: <code>{e.payload}</code>")
 
-    # ───────── My numbers ─────────
+    # ───────── My numbers (фильтр по сервису + пагинация 20/стр) ─────────
+    MN_PER_PAGE = 20
+
+    def _mn_page(lines: list[str], page: int) -> tuple[list[str], int, int]:
+        total = max(1, -(-len(lines) // MN_PER_PAGE))
+        page = max(0, min(page, total - 1))
+        return lines[page * MN_PER_PAGE:(page + 1) * MN_PER_PAGE], page, total
+
+    async def _mn_lines(state: FSMContext, sel: str) -> tuple[str, list[str]]:
+        data = await state.get_data()
+        if sel == "a":
+            return "🌐 Все номера", data.get("mn_all", [])
+        svcs = data.get("mn_svcs", [])
+        i = int(sel)
+        if i >= len(svcs):
+            return "", []
+        name = svcs[i]
+        return name, data.get("mn_by", {}).get(name, [])
+
     @r.message(F.text == "📱 Мои номера")
-    async def show_rents(m: Message):
+    async def show_rents(m: Message, state: FSMContext):
+        await state.clear()
         try:
-            rents = await api.list_rents(status="active")
+            rents = await api.list_rents_all(status="active")
         except GotSmsError as e:
             await m.answer(f"Ошибка API {e.status}")
             return
         if not rents:
             await m.answer("Активных номеров нет.")
             return
-        lines = ["<b>Активные номера:</b>"]
-        for x in rents[:30]:
-            lines.append(f"• <code>{x.phone}</code> — {x.service_name} (до {x.active_till or '—'})")
-        await m.answer("\n".join(lines))
+        by: dict[str, list[str]] = {}
+        all_lines: list[str] = []
+        for x in rents:
+            by.setdefault(x.service_name, []).append(f"• <code>{x.phone}</code> (до {x.active_till or '—'})")
+            all_lines.append(f"• <code>{x.phone}</code> — {x.service_name} (до {x.active_till or '—'})")
+        svcs = sorted(by.keys(), key=str.lower)
+        await state.update_data(mn_svcs=svcs, mn_by=by, mn_all=all_lines)
+        await m.answer(
+            f"📱 Активных номеров: <b>{len(all_lines)}</b> на {len(svcs)} сервисах.\nВыбери сервис:",
+            reply_markup=my_numbers_services_kb([(n, len(by[n])) for n in svcs]),
+        )
+
+    @r.callback_query(F.data.startswith("mn:svc:"))
+    async def mn_svc(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        sel = c.data.split(":")[2]
+        title, lines = await _mn_lines(state, sel)
+        if not lines:
+            await _safe_edit(c.message, "Данные устарели — открой «📱 Мои номера» заново.")
+            return
+        chunk, page, total = _mn_page(lines, 0)
+        await _safe_edit(c.message, f"<b>{title}</b> ({len(lines)} шт):\n" + "\n".join(chunk),
+                         reply_markup=my_numbers_nav_kb(sel, page, total))
+
+    @r.callback_query(F.data.startswith("mn:pg:"))
+    async def mn_pg(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        _, _, sel, page_s = c.data.split(":")
+        title, lines = await _mn_lines(state, sel)
+        if not lines:
+            await _safe_edit(c.message, "Данные устарели — открой «📱 Мои номера» заново.")
+            return
+        chunk, page, total = _mn_page(lines, int(page_s))
+        await _safe_edit(c.message, f"<b>{title}</b> ({len(lines)} шт):\n" + "\n".join(chunk),
+                         reply_markup=my_numbers_nav_kb(sel, page, total))
+
+    @r.callback_query(F.data == "mn:back")
+    async def mn_back(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        data = await state.get_data()
+        svcs = data.get("mn_svcs", [])
+        by = data.get("mn_by", {})
+        if not svcs:
+            await _safe_edit(c.message, "Данные устарели — открой «📱 Мои номера» заново.")
+            return
+        await _safe_edit(c.message, "📱 Выбери сервис:",
+                         reply_markup=my_numbers_services_kb([(n, len(by.get(n, []))) for n in svcs]))
+
+    @r.callback_query(F.data == "mn:noop")
+    async def mn_noop(c: CallbackQuery):
+        await c.answer()
 
     # ───────── SMS ─────────
     @r.message(F.text == "📨 SMS")

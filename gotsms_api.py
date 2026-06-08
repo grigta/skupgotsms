@@ -110,6 +110,11 @@ class GotSmsClient:
         self._rl_remaining = 30      # локальный бюджет окна
         self._rl_reset_unix = 0.0    # unix-время сброса окна (из X-RateLimit-Reset)
 
+    def set_token(self, token: str) -> None:
+        """Сменить API-токен (при переключении ЛК-аккаунта). Сбрасывает кеш."""
+        self._client.headers["Authorization"] = f"Bearer {token}"
+        self.invalidate_cache()
+
     def _lock_for(self, key: str) -> asyncio.Lock:
         lock = self._cache_locks.get(key)
         if lock is None:

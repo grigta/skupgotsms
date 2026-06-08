@@ -18,6 +18,7 @@ class LkCookieFlow(StatesGroup):
     waiting_label = State()
     waiting_session = State()
     waiting_xsrf = State()
+    waiting_token = State()
 
 
 class RefundFlow(StatesGroup):

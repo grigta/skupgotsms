@@ -166,9 +166,9 @@ class DB:
     async def lk_set_active(self, idx: int) -> None:
         await self.set_setting("lk_active", str(idx))
 
-    async def lk_add_account(self, label: str, session: str, xsrf: str) -> int:
+    async def lk_add_account(self, label: str, session: str, xsrf: str, api_token: str = "") -> int:
         accts = await self.lk_accounts()
-        accts.append({"label": label, "session": session, "xsrf": xsrf})
+        accts.append({"label": label, "session": session, "xsrf": xsrf, "api_token": api_token})
         await self.lk_save_accounts(accts)
         return len(accts) - 1
 

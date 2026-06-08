@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     telegram_user_id_raw: str = Field(
         validation_alias=AliasChoices("TELEGRAM_USER_IDS", "TELEGRAM_USER_ID")
     )
-    gotsms_api_token: str
+    gotsms_api_token: str = ""   # fallback; основной токен — у активного /lk-аккаунта
     gotsms_base_url: str = "https://app.gotsms.org"
     db_path: str = "data/skupgotsms.sqlite"
     default_autobuy_interval_sec: int = 30

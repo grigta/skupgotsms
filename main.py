@@ -78,7 +78,11 @@ async def main() -> None:
             idx = 0
         a = accounts[idx]
         lk = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
-        log.info("LK bulk-buy enabled (account: %s, всего %d)", a.get("label"), len(accounts))
+        # API-операции — через токен активного аккаунта (если задан)
+        if a.get("api_token"):
+            api.set_token(a["api_token"])
+        log.info("LK bulk-buy enabled (account: %s, api_token: %s, всего %d)",
+                 a.get("label"), "yes" if a.get("api_token") else "no", len(accounts))
     else:
         log.info("LK bulk-buy disabled — добавь аккаунт через /lk (иначе публичный API)")
 

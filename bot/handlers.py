@@ -185,12 +185,14 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         a = accts[idx]
         await db.lk_set_active(idx)
         was_none = autobuy.lk is None
+        from config import settings
         if autobuy.lk:
             await autobuy.lk.update_cookies(a["session"], a["xsrf"])
         else:
             from gotsms_lk import LkClient
-            from config import settings
             autobuy.lk = LkClient(a["session"], a["xsrf"], settings.lk_user_agent, base_url=settings.gotsms_base_url)
+        # API-операции (Мои номера/рефанд/баланс/SMS) — через токен этого же аккаунта
+        api.set_token(a.get("api_token") or settings.gotsms_api_token)
         if was_none:
             # первый аккаунт появился → перевести задания на hunter-режим
             await autobuy.restart_jobs()
@@ -294,13 +296,26 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         if len(val) < 20:
             await m.answer("Похоже, не то значение. Пришли <b>XSRF-TOKEN</b> ещё раз (или /menu).")
             return
+        await state.update_data(xsrf=val)
+        await state.set_state(LkCookieFlow.waiting_token)
+        await m.answer(
+            "Последний шаг — <b>API-токен</b> этого аккаунта (gotsms: Профиль → включить API → токен).\n"
+            "Нужен для «Мои номера», рефанда, баланса. Или отправь <code>-</code>, чтобы пропустить."
+        )
+
+    @r.message(LkCookieFlow.waiting_token)
+    async def lk_token(m: Message, state: FSMContext):
+        token = (m.text or "").strip()
+        if token in ("-", "—", "пропустить", "skip"):
+            token = ""
         data = await state.get_data()
         await state.clear()
-        idx = await db.lk_add_account(data.get("label", "acc"), data.get("session"), val)
-        alive = await _switch_lk(idx)  # сразу делаем активным
+        idx = await db.lk_add_account(data.get("label", "acc"), data.get("session"), data.get("xsrf"), token)
+        alive = await _switch_lk(idx)  # сразу делаем активным (+ свап API-токена)
         accts = await db.lk_accounts()
-        status = "✅ сессия жива, активна" if alive else "⚠️ сессия не отвечает (проверь cookie)"
-        await m.answer(f"Аккаунт <b>{data.get('label')}</b> добавлен — {status}.",
+        cookie_s = "✅ сессия жива" if alive else "⚠️ сессия не отвечает (проверь cookie)"
+        tok_s = "✅ API-токен задан" if token else "⚠️ без API-токена (Мои номера/рефанд не покажут этот аккаунт)"
+        await m.answer(f"Аккаунт <b>{data.get('label')}</b> добавлен — {cookie_s}, {tok_s}.",
                        reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
 
     # ───────── Refund by phone list ─────────

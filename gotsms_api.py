@@ -55,6 +55,7 @@ class Rent:
     status: str
     active_from: str | None
     active_till: str | None
+    renew: bool = False  # is_included_for_next_renewal
 
 
 @dataclass
@@ -362,6 +363,10 @@ class GotSmsClient:
     async def refund_rent(self, rent_id: str) -> dict:
         return await self._request("POST", f"/api/rents/{rent_id}/refund")
 
+    async def toggle_renewal(self, rent_id: str) -> dict:
+        """Переключить авто-продление аренды (флип). Возвращает is_included_for_next_renewal."""
+        return await self._request("POST", f"/api/rents/{rent_id}/renewal/toggle")
+
     async def unread_messages(self, mark_as_read: bool = True, per_page: int = 50) -> list[Message]:
         # Laravel boolean rule accepts 1/0, NOT the strings "true"/"false" (→ 422)
         params = {"mark_as_read": 1 if mark_as_read else 0, "per_page": per_page}
@@ -384,6 +389,7 @@ class GotSmsClient:
             status=str(x.get("status", "")),
             active_from=x.get("active_from"),
             active_till=x.get("active_till"),
+            renew=bool(x.get("is_included_for_next_renewal", False)),
         )
 
     @staticmethod

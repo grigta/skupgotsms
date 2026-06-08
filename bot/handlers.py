@@ -24,12 +24,14 @@ from .keyboards import (
     main_menu,
     my_numbers_nav_kb,
     my_numbers_services_kb,
+    norenew_confirm_kb,
+    norenew_services_kb,
     plans_kb,
     refund_confirm_kb,
     refund_services_kb,
     services_kb,
 )
-from .states import BuyFlow, IntervalFlow, LimitFlow, LkCookieFlow, RefundFlow
+from .states import BuyFlow, IntervalFlow, LimitFlow, LkCookieFlow, NorenewFlow, RefundFlow
 
 log = logging.getLogger("bot")
 SERVICES_PER_PAGE = 12
@@ -219,6 +221,10 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             lines.append(f"{mark} <b>{a.get('label', f'acc{i}')}</b> — {stat}")
         return "\n".join(lines)
 
+    async def _lk_kb(accts: list[dict], active: int):
+        sw = (await db.get_setting("lk_autoswitch")) == "1"
+        return lk_accounts_kb(accts, active, sw)
+
     @r.message(Command("lk"))
     async def lk_menu(m: Message, state: FSMContext):
         await state.clear()
@@ -230,13 +236,23 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         active = await db.lk_active_idx()
         msg = await m.answer("⏳ Проверяю аккаунты…")
         text = await _lk_menu_text(accts, active)
-        await _safe_edit(msg, text, reply_markup=lk_accounts_kb(accts, active))
+        await _safe_edit(msg, text, reply_markup=await _lk_kb(accts, active))
 
     @r.callback_query(F.data == "lk:add")
     async def lk_add(c: CallbackQuery, state: FSMContext):
         await c.answer()
         await state.set_state(LkCookieFlow.waiting_label)
         await c.message.answer("Введи <b>метку</b> нового аккаунта (любое имя):")
+
+    @r.callback_query(F.data == "lk:autoswitch")
+    async def lk_autoswitch(c: CallbackQuery):
+        cur = (await db.get_setting("lk_autoswitch")) == "1"
+        await db.set_setting("lk_autoswitch", "0" if cur else "1")
+        await c.answer("Автопереключение " + ("выключено" if cur else "включено"))
+        accts = await db.lk_accounts()
+        if accts:
+            await _safe_edit(c.message, await _lk_menu_text(accts, await db.lk_active_idx()),
+                             reply_markup=await _lk_kb(accts, await db.lk_active_idx()))
 
     @r.callback_query(F.data.startswith("lk:use:"))
     async def lk_use(c: CallbackQuery):
@@ -245,7 +261,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         await _switch_lk(idx)
         accts = await db.lk_accounts()
         active = await db.lk_active_idx()
-        await _safe_edit(c.message, await _lk_menu_text(accts, active), reply_markup=lk_accounts_kb(accts, active))
+        await _safe_edit(c.message, await _lk_menu_text(accts, active), reply_markup=await _lk_kb(accts, active))
 
     @r.callback_query(F.data.startswith("lk:del:"))
     async def lk_del(c: CallbackQuery):
@@ -268,7 +284,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
             await _safe_edit(c.message, "Аккаунтов нет. Bulk выключен (задания на публичном API). Добавь через /lk.")
             return
         await _safe_edit(c.message, await _lk_menu_text(accts, await db.lk_active_idx()),
-                         reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
+                         reply_markup=await _lk_kb(accts, await db.lk_active_idx()))
 
     @r.message(LkCookieFlow.waiting_label)
     async def lk_label(m: Message, state: FSMContext):
@@ -316,7 +332,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         cookie_s = "✅ сессия жива" if alive else "⚠️ сессия не отвечает (проверь cookie)"
         tok_s = "✅ API-токен задан" if token else "⚠️ без API-токена (Мои номера/рефанд не покажут этот аккаунт)"
         await m.answer(f"Аккаунт <b>{data.get('label')}</b> добавлен — {cookie_s}, {tok_s}.",
-                       reply_markup=lk_accounts_kb(accts, await db.lk_active_idx()))
+                       reply_markup=await _lk_kb(accts, await db.lk_active_idx()))
 
     # ───────── Refund by phone list ─────────
     @r.message(F.text == "💸 Рефанд")
@@ -472,6 +488,145 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         if fail:
             msg += f"\n❌ Ошибок: {len(fail)}\n" + "\n".join(f"<code>{f}</code>" for f in fail[:10])
         await c.message.answer(msg + bal_line)
+
+    # ───────── Отключение автопродления (по списку, выбор сервиса) ─────────
+    @r.message(F.text == "🔕 Автопродление")
+    async def nr_start(m: Message, state: FSMContext):
+        await state.clear()
+        try:
+            rents = await api.list_rents_all(status="active")
+        except GotSmsError as e:
+            await m.answer(f"Ошибка API {e.status} при загрузке аренд.")
+            return
+        rents = [r for r in rents if r.renew]  # только с включённым автопродлением
+        if not rents:
+            await m.answer("Нет номеров с включённым автопродлением.")
+            return
+        counts: dict[tuple[str, str], int] = {}
+        for r in rents:
+            counts[(r.service_id, r.service_name)] = counts.get((r.service_id, r.service_name), 0) + 1
+        items = sorted(counts.items(), key=lambda kv: kv[0][1].lower())
+        svc_buttons = [(sid, f"{name} ({n})") for (sid, name), n in items]
+        await state.update_data(nr_svc_list=[[sid, name] for (sid, name), _ in items])
+        await state.set_state(NorenewFlow.choosing_service)
+        await m.answer(
+            f"🔕 Отключить автопродление. Номеров с renew: <b>{len(rents)}</b> на {len(items)} сервисах.\n"
+            "Выбери сервис (или «🌐 Все»):",
+            reply_markup=norenew_services_kb(svc_buttons),
+        )
+
+    @r.callback_query(NorenewFlow.choosing_service, F.data.startswith("nr:svc:"))
+    async def nr_pick_service(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        sid = c.data.split(":", 2)[2]
+        data = await state.get_data()
+        names = {s[0]: s[1] for s in (data.get("nr_svc_list") or [])}
+        if sid == "all":
+            await state.update_data(nr_svc=None)
+            scope = "🌐 все сервисы"
+        else:
+            await state.update_data(nr_svc=sid)
+            scope = names.get(sid, "выбранный сервис")
+        await state.set_state(NorenewFlow.waiting_list)
+        await _safe_edit(
+            c.message,
+            f"🔕 Автопродление · <b>{scope}</b>.\n\n"
+            "Пришли номера — <b>по одному на строку</b> (формат любой). "
+            "Выключу автопродление у активных номеров с включённым renew. Отмена — /menu.",
+        )
+
+    @r.message(NorenewFlow.waiting_list)
+    async def nr_collect(m: Message, state: FSMContext):
+        wanted = [t for t in re.split(r"[\s,;]+", (m.text or "").strip()) if _digits(t)]
+        if not wanted:
+            await m.answer("Не вижу ни одного номера. Пришли список ещё раз или /menu.")
+            return
+        if len(wanted) > REFUND_MAX:
+            await m.answer(f"Слишком много ({len(wanted)}). Максимум {REFUND_MAX} за раз.")
+            return
+        data = await state.get_data()
+        svc_id = data.get("nr_svc")
+        await m.answer("⏳ Загружаю аренды и сопоставляю…")
+        try:
+            rents = await api.list_rents_all(status="active")
+        except GotSmsError as e:
+            await state.clear()
+            await m.answer(f"Ошибка API {e.status} при загрузке аренд.")
+            return
+        rents = [r for r in rents if r.renew]  # только включённый renew (его и выключаем)
+        if svc_id:
+            rents = [r for r in rents if r.service_id == svc_id]
+
+        by_full: dict[str, list] = defaultdict(list)
+        by_last10: dict[str, list] = defaultdict(list)
+        for rt in rents:
+            d = _digits(rt.phone)
+            if not d:
+                continue
+            by_full[d].append(rt)
+            by_last10[d[-10:]].append(rt)
+
+        matched: dict[str, object] = {}
+        not_found: list[str] = []
+        for raw in wanted:
+            d = _digits(raw)
+            hits = by_full.get(d) or (by_last10.get(d[-10:]) if len(d) >= 10 else None) or []
+            if hits:
+                for rt in hits:
+                    matched[rt.id] = rt
+            else:
+                not_found.append(raw)
+
+        if not matched:
+            await state.clear()
+            await m.answer("Совпадений нет (возможно автопродление уже выключено или номера не на этом сервисе).")
+            return
+
+        rows = list(matched.values())
+        per_svc: dict[str, int] = {}
+        for rt in rows:
+            per_svc[rt.service_name] = per_svc.get(rt.service_name, 0) + 1
+        breakdown = " · ".join(f"{k}: {v}" for k, v in sorted(per_svc.items()))
+        await state.update_data(nr_ids=list(matched.keys()))
+        await state.set_state(NorenewFlow.confirming)
+        preview = "\n".join(f"• <code>{rt.phone}</code> — {rt.service_name}" for rt in rows[:15])
+        more = f"\n…и ещё {len(rows) - 15}" if len(rows) > 15 else ""
+        nf_line = f"\n⚠️ Не найдено/уже off: {len(not_found)}" if not_found else ""
+        await m.answer(
+            f"Выключить автопродление у <b>{len(rows)}</b> номеров.\n"
+            f"По сервисам: {breakdown}.{nf_line}\n\n{preview}{more}\n\nВыключить renew?",
+            reply_markup=norenew_confirm_kb(),
+        )
+
+    @r.callback_query(F.data == "nr:cancel")
+    async def nr_cancel(c: CallbackQuery, state: FSMContext):
+        await c.answer()
+        await state.clear()
+        await _safe_edit(c.message, "Отменено.")
+
+    @r.callback_query(F.data == "nr:confirm")
+    async def nr_do(c: CallbackQuery, state: FSMContext):
+        await c.answer("Выключаю…")
+        data = await state.get_data()
+        ids = list(data.get("nr_ids") or [])
+        await state.clear()
+        if not ids:
+            await _safe_edit(c.message, "Список пуст, начни заново.")
+            return
+        await _safe_edit(c.message, f"⏳ Выключаю автопродление у {len(ids)} шт…")
+        ok = 0
+        fail: list[str] = []
+        for rid in ids:
+            try:
+                await api.toggle_renewal(rid)
+                ok += 1
+            except GotSmsError as e:
+                fail.append(f"{rid[:8]}…: {e.status}")
+            await asyncio.sleep(0.1)
+        msg = f"🔕 Автопродление выключено у <b>{ok}</b> из {len(ids)}."
+        if fail:
+            msg += f"\n❌ Ошибок: {len(fail)}\n" + "\n".join(f"<code>{f}</code>" for f in fail[:10])
+        await c.message.answer(msg)
 
     # ───────── Buy flow (one-shot) ─────────
     @r.message(F.text == "🛒 Купить номер")

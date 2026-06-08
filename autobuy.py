@@ -47,6 +47,38 @@ class AutobuyManager:
             self._stop_job(job.id)
             self._start_job(job)
 
+    async def _autoswitch(self) -> bool:
+        """Если включено автопереключение и активный аккаунт пуст — перейти на
+        следующий аккаунт с балансом (cookie + API-токен). True если переключились."""
+        if (await self.db.get_setting("lk_autoswitch")) != "1":
+            return False
+        if not self.lk:
+            return False
+        accts = await self.db.lk_accounts()
+        if len(accts) < 2:
+            return False
+        cur = await self.db.lk_active_idx()
+        from gotsms_lk import LkClient
+        for off in range(1, len(accts) + 1):
+            i = (cur + off) % len(accts)
+            if i == cur:
+                continue
+            a = accts[i]
+            tmp = LkClient(a["session"], a["xsrf"], self.lk._ua, self.lk.base)  # noqa: SLF001
+            try:
+                bal = await tmp.balance()
+            except Exception:
+                bal = None
+            finally:
+                await tmp.aclose()
+            if bal and bal > 0:
+                await self.db.lk_set_active(i)
+                await self.lk.update_cookies(a["session"], a["xsrf"])
+                self.api.set_token(a.get("api_token") or "")
+                await self.notify(f"🔄 Автопереключение на аккаунт <b>{a.get('label')}</b> (баланс ${bal:.2f})")
+                return True
+        return False
+
     # ───────── управление job: LK → hunter-loop, иначе scheduler ─────────
     def _start_job(self, job: AutobuyJob) -> None:
         if self.lk:
@@ -156,7 +188,15 @@ class AutobuyManager:
                         await asyncio.sleep(pause)
                         continue
 
-                if price <= 0 or balance < price:
+                if price <= 0:
+                    await asyncio.sleep(pause)
+                    continue
+                if balance < price:
+                    # активный аккаунт пуст — пробуем автопереключение на другой
+                    if await self._autoswitch():
+                        price = 0.0
+                        last_meta = -1e9  # форс refetch баланса/цены нового аккаунта
+                        continue
                     await asyncio.sleep(pause)
                     continue
 

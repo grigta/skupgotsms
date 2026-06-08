@@ -25,3 +25,9 @@ class RefundFlow(StatesGroup):
     choosing_service = State()
     waiting_list = State()
     confirming = State()
+
+
+class NorenewFlow(StatesGroup):
+    choosing_service = State()
+    waiting_list = State()
+    confirming = State()

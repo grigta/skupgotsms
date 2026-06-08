@@ -12,6 +12,7 @@ def main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="📨 SMS")],
             [KeyboardButton(text="🛒 Купить номер"), KeyboardButton(text="📱 Мои номера")],
             [KeyboardButton(text="🤖 Автобай"), KeyboardButton(text="💸 Рефанд")],
+            [KeyboardButton(text="🔕 Автопродление")],
         ],
         resize_keyboard=True,
     )
@@ -115,7 +116,7 @@ def my_numbers_nav_kb(sel: str, page: int, total_pages: int) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def lk_accounts_kb(accounts: list[dict], active: int) -> InlineKeyboardMarkup:
+def lk_accounts_kb(accounts: list[dict], active: int, autoswitch: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for i, a in enumerate(accounts):
         mark = "✅ " if i == active else "▫️ "
@@ -124,6 +125,8 @@ def lk_accounts_kb(accounts: list[dict], active: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🗑", callback_data=f"lk:del:{i}"),
         ])
     rows.append([InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="lk:add")])
+    sw = "🔄 Автопереключение: ВКЛ" if autoswitch else "🔄 Автопереключение: выкл"
+    rows.append([InlineKeyboardButton(text=sw, callback_data="lk:autoswitch")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -135,6 +138,23 @@ def refund_services_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=label, callback_data=f"rf:svc:{sid}")])
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="rf:cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def norenew_services_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🌐 Все сервисы", callback_data="nr:svc:all")]
+    ]
+    for sid, label in items:
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"nr:svc:{sid}")])
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nr:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def norenew_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔕 Выключить автопродление", callback_data="nr:confirm")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="nr:cancel")],
+    ])
 
 
 def refund_confirm_kb() -> InlineKeyboardMarkup:

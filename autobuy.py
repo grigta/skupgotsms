@@ -18,6 +18,10 @@ log = logging.getLogger("autobuy")
 # в клиенте (GotSmsClient), так что 429 ловить не будем.
 BATCH_LADDER = [25, 10, 1]
 
+# Раз в BLIND_EVERY секунд hunter пробует rent даже если probe показал «пусто» —
+# страховка от заниженного area-code count (probe врёт для части сервисов).
+BLIND_EVERY = 30.0
+
 # Notify callback: (text) -> awaitable. Set by main.
 NotifyFn = Callable[[str], Awaitable[None]]
 
@@ -156,6 +160,7 @@ class AutobuyManager:
         price = 0.0
         balance = 0.0
         last_meta = -1e9
+        last_blind = -1e9  # когда последний раз пробовали rent «вслепую»
         try:
             while True:
                 job = await self.db.get_job(job_id)
@@ -214,13 +219,19 @@ class AutobuyManager:
                     await asyncio.sleep(pause)
                     continue
 
-                if not modal or avail <= 0:
-                    await asyncio.sleep(pause)  # пул пуст — ждём и снова probe
+                now2 = loop.time()
+                # gate решает «пробовать ли»: probe видит сток ЛИБО давно не пробовали
+                # вслепую (probe бывает врёт — area-code count занижен).
+                attempt = (modal is not None) and (avail > 0 or (now2 - last_blind) >= BLIND_EVERY)
+                if not attempt:
+                    await asyncio.sleep(pause)
                     continue
+                if avail <= 0:
+                    last_blind = now2  # засекаем слепую попытку
 
-                # есть номера! выкупаем пачкой одним rent
-                room = (job.buy_limit - job.bought_count) if job.buy_limit else avail
-                n = min(25, avail, int(balance // price), room)
+                # количество шлём щедрое — rent сам возьмёт сколько реально есть в пуле
+                room = (job.buy_limit - job.bought_count) if job.buy_limit else 25
+                n = min(25, int(balance // price), room)
                 if n <= 0:
                     await asyncio.sleep(pause)
                     continue
@@ -234,11 +245,14 @@ class AutobuyManager:
                 if cnt > 0:
                     balance -= price * cnt
                     await self.db.record_run(job.id, cnt, "ok")
+                    log.info("hunt job=%s bought=%d (probe avail=%d, blind=%s)",
+                             job_id, cnt, avail, avail <= 0)
                     await self.notify(f"✅ Куплено {cnt} ({job.service_name}). Остаток: {balance:.2f}")
-                    # пул может ещё держать — сразу следующий круг без паузы
+                    last_blind = -1e9  # был сток — гонимся пачками без слепой паузы
                     continue
                 else:
-                    # между probe и rent номера разобрали — короткая пауза
+                    if avail > 0:
+                        log.info("hunt job=%s probe avail=%d, но rent=0/%s", job_id, avail, st)
                     await asyncio.sleep(1)
         except asyncio.CancelledError:
             return

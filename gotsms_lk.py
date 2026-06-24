@@ -185,7 +185,13 @@ class LkClient:
         if not modal:
             return None, 0
         modal_raw, modal_s = modal
-        return modal_raw, self._available_count(modal_s["data"])
+        data = modal_s["data"]
+        counts = self._available_count(data)
+        maxq = int(data.get("maxQuantity") or 0)
+        # area-code count бывает занижен/нулевой (напр. Bank of America), хотя
+        # номер реально доступен — подстраховываемся maxQuantity (>1 = есть сток).
+        avail = counts if counts > 0 else (maxq if maxq > 1 else 0)
+        return modal_raw, avail
 
     async def rent(self, modal_raw: str, qty: int) -> tuple[int, str]:
         """Выкуп по уже полученному snapshot модалки (из probe)."""

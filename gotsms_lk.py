@@ -115,7 +115,10 @@ class LkClient:
 
     async def bootstrap(self) -> None:
         """Свежие csrf, livewire-uri и snapshot модального хоста со страницы покупки."""
-        r = await self._cli.get("/rents/create")
+        try:
+            r = await self._cli.get("/rents/create")
+        except httpx.HTTPError as e:
+            raise LkError(f"network: {type(e).__name__}") from e
         if r.status_code in (301, 302) or "/login" in str(r.headers.get("location", "")):
             raise LkAuthError("сессия ЛК протухла (редирект на /login)")
         if r.status_code != 200:
@@ -137,10 +140,13 @@ class LkClient:
         if not self._csrf or not self._uri:
             await self.bootstrap()
         body = {"_token": self._csrf, "components": components}
-        r = await self._cli.post(self._uri, json=body, headers={
-            "X-Livewire": "true", "Content-Type": "application/json",
-            "X-CSRF-TOKEN": self._csrf, "Accept": "*/*", "Referer": self.base + "/rents/create",
-        })
+        try:
+            r = await self._cli.post(self._uri, json=body, headers={
+                "X-Livewire": "true", "Content-Type": "application/json",
+                "X-CSRF-TOKEN": self._csrf, "Accept": "*/*", "Referer": self.base + "/rents/create",
+            })
+        except httpx.HTTPError as e:  # timeout/connect/522-read и т.п. — не роняем цикл
+            raise LkError(f"network: {type(e).__name__}") from e
         if r.status_code == 419:  # CSRF/сессия истекла
             raise LkAuthError("419 — сессия истекла")
         if r.status_code == 401 or r.status_code == 403:

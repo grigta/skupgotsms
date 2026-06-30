@@ -38,6 +38,20 @@ class AutobuyManager:
 
     def start(self) -> None:
         self.scheduler.start()
+        self.scheduler.add_job(
+            self._watchdog, "interval", seconds=120, id="hunt_watchdog",
+            next_run_time=None, max_instances=1, coalesce=True,
+        )
+
+    async def _watchdog(self) -> None:
+        """Перезапустить охотников для включённых заданий, чьи задачи умерли."""
+        if not self.lk:
+            return  # без ЛК работает scheduler-механизм
+        for job in await self.db.list_jobs(only_enabled=True):
+            t = self._tasks.get(job.id)
+            if t is None or t.done():
+                log.warning("watchdog: перезапуск hunt job=%s", job.id)
+                self._start_loop(job.id)
 
     async def restore(self) -> None:
         for job in await self.db.list_jobs(only_enabled=True):
@@ -257,7 +271,13 @@ class AutobuyManager:
         except asyncio.CancelledError:
             return
         except Exception as e:
-            log.exception("hunt_loop job=%s crashed: %s", job_id, e)
+            # любой непойманный сбой не должен убивать охотника навсегда —
+            # логируем и перезапускаем задание, если оно ещё включено
+            log.exception("hunt_loop job=%s crashed, перезапуск: %s", job_id, e)
+            await asyncio.sleep(3)
+            job = await self.db.get_job(job_id)
+            if job and job.enabled:
+                self._tasks[job_id] = asyncio.create_task(self._hunt_loop(job_id))
 
     async def _buy_one(self, plan_id: str) -> tuple[str, object | None]:
         """Одна покупка. Возвращает ('ok', rent) | ('no_numbers'|'insufficient_funds'|f'err:{code}', None)."""

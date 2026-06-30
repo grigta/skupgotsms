@@ -181,14 +181,19 @@ class LkClient:
         Snapshot можно сразу передать в `rent` для немедленного выкупа."""
         if not self._modal_snapshot:
             await self.bootstrap()
-        open_resp = await self._post([{
-            "snapshot": self._modal_snapshot, "updates": {},
-            "calls": [{"path": "", "method": "__dispatch",
-                       "params": ["openModal", {"component": MODAL, "arguments": {"planId": plan_id}}]}],
-        }])
+        try:
+            open_resp = await self._post([{
+                "snapshot": self._modal_snapshot, "updates": {},
+                "calls": [{"path": "", "method": "__dispatch",
+                           "params": ["openModal", {"component": MODAL, "arguments": {"planId": plan_id}}]}],
+            }])
+        except LkError:
+            self._modal_snapshot = None  # snapshot протух (перезапуск gotsms) — форс-ребутстрап
+            raise
         eff_html = open_resp["components"][0].get("effects", {}).get("html", "")
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:
+            self._modal_snapshot = None  # пустой ответ — snapshot устарел, форс-ребутстрап
             return None, 0
         modal_raw, modal_s = modal
         data = modal_s["data"]

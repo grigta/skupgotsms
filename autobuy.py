@@ -92,7 +92,8 @@ class AutobuyManager:
             if bal and bal > 0:
                 await self.db.lk_set_active(i)
                 await self.lk.update_cookies(a["session"], a["xsrf"])
-                self.api.set_token(a.get("api_token") or "")
+                if a.get("api_token"):
+                    self.api.set_token(a["api_token"])
                 await self.notify(f"🔄 Автопереключение на аккаунт <b>{a.get('label')}</b> (баланс ${bal:.2f})")
                 return True
         return False

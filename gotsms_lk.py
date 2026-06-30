@@ -190,7 +190,11 @@ class LkClient:
         except LkError:
             self._modal_snapshot = None  # snapshot протух (перезапуск gotsms) — форс-ребутстрап
             raise
-        eff_html = open_resp["components"][0].get("effects", {}).get("html", "")
+        components = open_resp.get("components") or []
+        if not components:
+            self._modal_snapshot = None
+            raise LkError("probe: пустой components в ответе")
+        eff_html = components[0].get("effects", {}).get("html", "")
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:
             self._modal_snapshot = None  # пустой ответ — snapshot устарел, форс-ребутстрап
@@ -212,7 +216,7 @@ class LkClient:
             "updates": {"selectedAreaCode": "", "quantity": qty},
             "calls": [{"path": "", "method": "rent", "params": []}],
         }])
-        return self._parse_rent(buy_resp)
+        return self._parse_rent(buy_resp, qty)
 
     async def buy(self, plan_id: str, quantity: int) -> tuple[int, str]:
         """Купить до `quantity` (≤25) номеров. Сначала probe (0.8с): если пул
@@ -223,7 +227,7 @@ class LkClient:
         return await self.rent(modal_raw, min(quantity, available, MAX_PER_RENT))
 
     @staticmethod
-    def _parse_rent(resp: dict) -> tuple[int, str]:
+    def _parse_rent(resp: dict, qty_requested: int = 0) -> tuple[int, str]:
         txt = json.dumps(resp).lower()
         # успех: dispatch notify "Successfully rented N number(s)"
         m = re.search(r"successfully rented\s+(\d+)\s+number", txt)
@@ -233,9 +237,9 @@ class LkClient:
             return 0, "no_numbers"
         if "insufficient" in txt or "not enough" in txt or "balance" in txt:
             return 0, "insufficient_funds"
-        # иногда успех без числа — но notify есть
+        # успех без явного числа — считаем qty_requested (иначе bought_count не пишется)
         if "rented" in txt and "success" in txt:
-            return 0, "ok"
+            return max(1, qty_requested), "ok"
         return 0, "err"
 
 

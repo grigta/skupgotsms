@@ -235,11 +235,13 @@ class LkClient:
             return int(m.group(1)), "ok"
         if "no number" in txt or "not available" in txt or "out of stock" in txt or "sold out" in txt:
             return 0, "no_numbers"
-        if "insufficient" in txt or "not enough" in txt or "balance" in txt:
-            return 0, "insufficient_funds"
-        # успех без явного числа — считаем qty_requested (иначе bought_count не пишется)
+        # fallback-успех раньше "balance": livewire-ответы содержат поле balance в
+        # состоянии компонента, и "balance" in txt давал ложный insufficient_funds
+        # когда уведомление приходило без точной фразы "successfully rented N number(s)".
         if "rented" in txt and "success" in txt:
             return max(1, qty_requested), "ok"
+        if "insufficient" in txt or "not enough" in txt or "balance" in txt:
+            return 0, "insufficient_funds"
         return 0, "err"
 
 

@@ -194,6 +194,10 @@ class LkClient:
         if not components:
             self._modal_snapshot = None
             raise LkError("probe: пустой components в ответе")
+        # Обновляем snapshot хоста из ответа — Livewire v3 меняет checksum на каждый запрос
+        updated_snap = components[0].get("snapshot")
+        if updated_snap:
+            self._modal_snapshot = updated_snap
         eff_html = components[0].get("effects", {}).get("html", "")
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:

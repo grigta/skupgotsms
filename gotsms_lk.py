@@ -198,7 +198,7 @@ class LkClient:
         updated_snap = components[0].get("snapshot")
         if updated_snap:
             self._modal_snapshot = updated_snap
-        eff_html = components[0].get("effects", {}).get("html", "")
+        eff_html = (components[0].get("effects") or {}).get("html") or ""
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:
             self._modal_snapshot = None  # пустой ответ — snapshot устарел, форс-ребутстрап

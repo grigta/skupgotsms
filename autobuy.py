@@ -273,12 +273,16 @@ class AutobuyManager:
             return
         except Exception as e:
             # любой непойманный сбой не должен убивать охотника навсегда —
-            # логируем и перезапускаем задание, если оно ещё включено
+            # логируем и перезапускаем задание, если оно ещё включено.
+            # Сначала убираем из dict — watchdog может перезапустить за время сна,
+            # и тогда повторный create_task создал бы дублирующий цикл.
             log.exception("hunt_loop job=%s crashed, перезапуск: %s", job_id, e)
+            self._tasks.pop(job_id, None)
             await asyncio.sleep(3)
-            job = await self.db.get_job(job_id)
-            if job and job.enabled:
-                self._tasks[job_id] = asyncio.create_task(self._hunt_loop(job_id))
+            if job_id not in self._tasks:  # watchdog уже перезапустил — не дублируем
+                job = await self.db.get_job(job_id)
+                if job and job.enabled:
+                    self._tasks[job_id] = asyncio.create_task(self._hunt_loop(job_id))
 
     async def _buy_one(self, plan_id: str) -> tuple[str, object | None]:
         """Одна покупка. Возвращает ('ok', rent) | ('no_numbers'|'insufficient_funds'|f'err:{code}', None)."""

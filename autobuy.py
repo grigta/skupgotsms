@@ -159,7 +159,6 @@ class AutobuyManager:
             trigger=IntervalTrigger(seconds=max(10, job.interval_sec)),
             id=sid,
             args=[job.id],
-            next_run_time=None,
             max_instances=1,
             coalesce=True,
         )

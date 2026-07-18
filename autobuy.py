@@ -9,7 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db import DB, AutobuyJob
 from gotsms_api import GotSmsClient, GotSmsError, NoNumbersAvailable, InsufficientFunds
-from gotsms_lk import MAX_PER_RENT, LkClient, LkAuthError, LkError
+from gotsms_lk import MAX_PER_RENT, LkClient, LkPool, LkAuthError, LkError
 
 log = logging.getLogger("autobuy")
 
@@ -40,6 +40,9 @@ class AutobuyManager:
         self._lock = asyncio.Lock()
         self._tasks: dict[int, asyncio.Task] = {}  # hunter-циклы по job_id (LK-режим)
         self._beats: dict[int, float] = {}  # когда последний раз отметились «живы»
+        self._pool: LkPool | None = None  # параллельный выкуп всеми аккаунтами
+        self._pool_sig: str = ""  # состав аккаунтов, под который собран пул
+        self._pool_extra: list[LkClient] = []  # клиенты неактивных аккаунтов
 
     def start(self) -> None:
         self.scheduler.start()
@@ -50,6 +53,56 @@ class AutobuyManager:
             self._watchdog, "interval", seconds=120, id="hunt_watchdog",
             max_instances=1, coalesce=True, replace_existing=True,
         )
+
+    async def _ensure_pool(self) -> LkPool | None:
+        """Пул по всем ЛК-аккаунтам (None — если аккаунт один, пул не нужен).
+
+        Сервер сериализует покупки внутри аккаунта (lock на балансе), поэтому
+        скорость растёт только за счёт РАЗНЫХ аккаунтов. Активный переиспользует
+        self.lk — не плодим лишние httpx-клиенты и держим keep-alive."""
+        if not self.lk:
+            return None
+        accts = await self.db.lk_accounts()
+        if len(accts) < 2:
+            return None
+        active = await self.db.lk_active_idx()
+        if not (0 <= active < len(accts)):
+            active = 0
+        sig = "#%d|" % active + "|".join(
+            "%s:%s:%s" % (a.get("label"), (a.get("session") or "")[:16], a.get("proxy") or "")
+            for a in accts
+        )
+        if sig == self._pool_sig and self._pool is not None:
+            return self._pool
+        for c in self._pool_extra:  # состав сменился — старые клиенты закрываем
+            try:
+                await c.aclose()
+            except Exception:
+                pass
+        self._pool_extra = []
+        clients: list[LkClient] = []
+        for i, a in enumerate(accts):
+            if i == active:
+                clients.append(self.lk)
+                continue
+            c = LkClient(a["session"], a["xsrf"], self.lk._ua, self.lk.base,  # noqa: SLF001
+                         proxy=a.get("proxy"))
+            self._pool_extra.append(c)
+            clients.append(c)
+        self._pool = LkPool.from_clients(clients)
+        self._pool_sig = sig
+        log.info("ЛК-пул собран: %d аккаунтов (%s)", len(clients),
+                 ", ".join(str(a.get("label")) for a in accts))
+        return self._pool
+
+    @staticmethod
+    async def _nap(loop, cycle_start: float, interval_sec: int) -> None:
+        """Доспать остаток такта. probe уже съел часть интервала — раньше мы
+        спали ПОВЕРХ него, из-за чего «интервал 2с» на деле давал ~2.3с, а
+        меньше секунды выставить было нельзя вовсе."""
+        left = min(max(interval_sec, 0), 5) - (loop.time() - cycle_start)
+        if left > 0:
+            await asyncio.sleep(left)
 
     async def _beat(self, job_id: int, now: float, status: str) -> None:
         """Отметить, что охотник жив (не покупка). Иначе задание с нулём покупок
@@ -204,6 +257,7 @@ class AutobuyManager:
         last_blind = -1e9  # когда последний раз пробовали rent «вслепую»
         try:
             while True:
+                cycle_start = loop.time()  # такт считаем ОТ начала, не поверх probe
                 job = await self.db.get_job(job_id)
                 if not job or not job.enabled:
                     return
@@ -214,7 +268,6 @@ class AutobuyManager:
                         f"🎯 Автобай <b>{job.service_name}</b>: лимит {job.buy_limit} достигнут — остановлен."
                     )
                     return
-                pause = max(1, min(job.interval_sec, 5))  # частота poll на пустом пуле
 
                 # price + balance из API не чаще раза в 25с (бережём лимит 30/мин)
                 now = loop.time()
@@ -231,11 +284,11 @@ class AutobuyManager:
                             self._tasks.pop(job_id, None)
                             await self.notify(f"⛔ Автобай <b>{job.service_name}</b> остановлен (auth error)")
                             return
-                        await asyncio.sleep(pause)
+                        await self._nap(loop, cycle_start, job.interval_sec)
                         continue
 
                 if price <= 0:
-                    await asyncio.sleep(pause)
+                    await self._nap(loop, cycle_start, job.interval_sec)
                     continue
                 if balance < price:
                     # активный аккаунт пуст — пробуем автопереключение на другой
@@ -243,7 +296,7 @@ class AutobuyManager:
                         price = 0.0
                         last_meta = -1e9  # форс refetch баланса/цены нового аккаунта
                         continue
-                    await asyncio.sleep(pause)
+                    await self._nap(loop, cycle_start, job.interval_sec)
                     continue
 
                 # дешёвая проверка наличия через ЛК (openModal ~0.8с, не лимит)
@@ -257,7 +310,7 @@ class AutobuyManager:
                     )
                     return
                 except LkError:
-                    await asyncio.sleep(pause)
+                    await self._nap(loop, cycle_start, job.interval_sec)
                     continue
 
                 now2 = loop.time()
@@ -266,7 +319,7 @@ class AutobuyManager:
                 attempt = (modal is not None) and (avail > 0 or (now2 - last_blind) >= BLIND_EVERY)
                 if not attempt:
                     await self._beat(job_id, now2, "пул пуст" if modal is not None else "модалка не отдалась")
-                    await asyncio.sleep(pause)
+                    await self._nap(loop, cycle_start, job.interval_sec)
                     continue
                 if avail <= 0:
                     last_blind = now2  # засекаем слепую попытку
@@ -280,21 +333,36 @@ class AutobuyManager:
                 n = min(cap, MAX_PER_RENT, int(balance // price), room)
                 if n <= 0:
                     await self._beat(job_id, now2, "нет места/баланса")
-                    await asyncio.sleep(pause)
+                    await self._nap(loop, cycle_start, job.interval_sec)
                     continue
                 try:
                     cnt, st = await self.lk.rent(modal, n)
                 except (LkAuthError, LkError) as e:
                     log.warning("hunt rent job=%s: %s", job_id, e)
-                    await asyncio.sleep(pause)
+                    await self._nap(loop, cycle_start, job.interval_sec)
                     continue
 
                 if cnt > 0:
                     balance -= price * cnt
-                    await self.db.record_run(job.id, cnt, "ok")
-                    log.info("hunt job=%s bought=%d (probe avail=%d, maxq=%d, blind=%s)",
-                             job_id, cnt, avail, maxq, avail <= 0)
-                    await self.notify(f"✅ Куплено {cnt} ({job.service_name}). Остаток: {balance:.2f}")
+                    # Сток есть — добираем остаток ПАРАЛЛЕЛЬНО остальными аккаунтами.
+                    # Внутри одного аккаунта сервер сериализует покупки (lock на
+                    # балансе), поэтому ускорение даёт только фан-аут по разным.
+                    extra = 0
+                    pool = await self._ensure_pool()
+                    if pool is not None:
+                        left = (job.buy_limit - job.bought_count - cnt) if job.buy_limit else MAX_PER_RENT
+                        if left > 0:
+                            try:
+                                extra = await pool.buy_bulk(job.plan_id, left, price)
+                            except Exception as e:  # пул не должен ронять охоту
+                                log.warning("pool buy_bulk job=%s: %s", job_id, e)
+                    total = cnt + extra
+                    await self.db.record_run(job.id, total, "ok")
+                    log.info("hunt job=%s bought=%d (свой=%d, пул=%d, avail=%d, maxq=%d, blind=%s)",
+                             job_id, total, cnt, extra, avail, maxq, avail <= 0)
+                    tail = f" (+{extra} пулом)" if extra else ""
+                    await self.notify(
+                        f"✅ Куплено {total}{tail} ({job.service_name}). Остаток: {balance:.2f}")
                     last_blind = -1e9  # был сток — гонимся пачками без слепой паузы
                     continue
                 else:

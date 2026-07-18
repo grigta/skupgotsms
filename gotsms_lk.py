@@ -11,6 +11,7 @@ Flow одной bulk-покупки:
 """
 from __future__ import annotations
 
+import asyncio
 import html as htmlmod
 import json
 import logging
@@ -33,20 +34,31 @@ class LkAuthError(LkError):
 
 
 class LkClient:
-    def __init__(self, session_cookie: str, xsrf_cookie: str, user_agent: str, base_url: str = "https://app.gotsms.org"):
+    def __init__(self, session_cookie: str, xsrf_cookie: str, user_agent: str,
+                 base_url: str = "https://app.gotsms.org", proxy: str | None = None):
         self.base = base_url
         self._cookies = {"gotsms_session": session_cookie, "XSRF-TOKEN": xsrf_cookie}
         self._ua = user_agent
-        self._cli = httpx.AsyncClient(
-            base_url=base_url, cookies=self._cookies,
-            headers={"User-Agent": user_agent}, timeout=40.0, follow_redirects=False,
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
-        )
+        self._proxy = proxy or None  # "socks5://user:pass@host:port" | "http://..."
+        self._cli = self._new_client()
         self._csrf: str | None = None
         self._uri: str | None = None
         self._modal_snapshot: str | None = None  # raw JSON-строка snapshot `livewire-ui-modal`
         self._last_area_code: str = ""  # код региона из последнего probe (для rent)
         self.last_rent_detail: str = ""  # что ответил сервер на последний неудачный rent
+
+    def _new_client(self) -> httpx.AsyncClient:
+        """httpx-клиент этого аккаунта. Прокси задаётся на аккаунт: при работе
+        пулом каждый аккаунт ходит со своего адреса, а не все с одного IP."""
+        kw = {}
+        if self._proxy:
+            kw["proxy"] = self._proxy
+        return httpx.AsyncClient(
+            base_url=self.base, cookies=self._cookies,
+            headers={"User-Agent": self._ua}, timeout=40.0, follow_redirects=False,
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            **kw,
+        )
 
     async def aclose(self) -> None:
         await self._cli.aclose()
@@ -55,11 +67,7 @@ class LkClient:
         """Заменить cookie-сессию на лету (после ручного обновления через бота)."""
         await self._cli.aclose()
         self._cookies = {"gotsms_session": session_cookie, "XSRF-TOKEN": xsrf_cookie}
-        self._cli = httpx.AsyncClient(
-            base_url=self.base, cookies=self._cookies,
-            headers={"User-Agent": self._ua}, timeout=40.0, follow_redirects=False,
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
-        )
+        self._cli = self._new_client()
         self._csrf = None
         self._uri = None
         self._modal_snapshot = None  # форс rebootstrap на следующей покупке
@@ -308,8 +316,19 @@ class LkPool:
     скорости складываются: N аккаунтов ≈ N×74/мин."""
 
     def __init__(self, accounts: list[dict], user_agent: str, base_url: str = "https://app.gotsms.org"):
-        # accounts: [{"session": "...", "xsrf": "..."}, ...]
-        self.clients = [LkClient(a["session"], a["xsrf"], user_agent, base_url) for a in accounts]
+        # accounts: [{"session": "...", "xsrf": "...", "proxy": "socks5://..."}, ...]
+        self.clients = [
+            LkClient(a["session"], a["xsrf"], user_agent, base_url, proxy=a.get("proxy"))
+            for a in accounts
+        ]
+
+    @classmethod
+    def from_clients(cls, clients: list[LkClient]) -> "LkPool":
+        """Пул поверх уже живых клиентов (переиспользуем keep-alive соединения
+        вместо пересоздания httpx-клиента на каждый выкуп)."""
+        p = cls.__new__(cls)
+        p.clients = list(clients)
+        return p
 
     async def aclose(self) -> None:
         for c in self.clients:
@@ -319,21 +338,44 @@ class LkPool:
     def size(self) -> int:
         return len(self.clients)
 
-    async def _drain_one(self, cli: LkClient, plan_id: str, target: int, price: float, balances: dict, idx: int) -> int:
-        """Один аккаунт последовательно выкупает по 25, пока не возьмёт `target`
-        или пул/баланс не иссякнут. Баланс аккаунта ведём в balances[idx]."""
+    async def _drain_one(self, cli: LkClient, plan_id: str, budget: dict, lock: asyncio.Lock,
+                         price: float, balances: dict, idx: int) -> int:
+        """Один аккаунт тянет из ОБЩЕГО бюджета, пока тот не иссякнет или пул
+        не опустеет. Бюджет общий и под локом — иначе N аккаунтов выкупят
+        N×target и вылезут за buy_limit (это реальные деньги).
+
+        Если бюджет разобран, но другие аккаунты ещё в полёте — ЖДЁМ, а не
+        выходим: они вернут недобор, и работа достанется нам. Иначе аккаунт
+        с большим стоком мог не поучаствовать вовсе."""
         bought = 0
-        while bought < target:
-            n = min(25, target - bought)
-            if price > 0 and balances.get(idx, 1e9) < price:
-                break
+        while True:
+            async with lock:
+                if price > 0 and balances.get(idx, 1e9) < price:
+                    break  # денег нет — этот аккаунт закончил
+                if budget["n"] <= 0:
+                    if budget["inflight"] <= 0:
+                        break  # никто не работает и пополнить бюджет некому
+                    take = 0  # ждём возврата недобора от других
+                else:
+                    take = min(MAX_PER_RENT, budget["n"])
+                    budget["n"] -= take  # резервируем свою долю заранее
+                    budget["inflight"] += 1
+            if take == 0:
+                await asyncio.sleep(0.05)
+                continue
             try:
-                cnt, st = await cli.buy(plan_id, n)
+                cnt, st = await cli.buy(plan_id, take)
             except (LkAuthError, LkError) as e:
                 log.warning("pool acct#%d: %s", idx, e)
+                async with lock:
+                    budget["n"] += take  # не смогли — возвращаем долю в общий котёл
+                    budget["inflight"] -= 1
                 break
+            async with lock:
+                budget["n"] += take - cnt  # недобор возвращаем другим аккаунтам
+                budget["inflight"] -= 1
             if cnt <= 0:
-                break  # no_numbers / insufficient
+                break  # no_numbers / insufficient — этому аккаунту тут ловить нечего
             bought += cnt
             if price > 0 and idx in balances:
                 balances[idx] -= price * cnt
@@ -341,11 +383,16 @@ class LkPool:
 
     async def buy_bulk(self, plan_id: str, total: int, price: float = 0.0, balances: dict | None = None) -> int:
         """Выкупить до `total` номеров плана, раскидав работу по аккаунтам
-        ПАРАЛЛЕЛЬНО. Возвращает фактически купленное."""
-        if not self.clients:
+        ПАРАЛЛЕЛЬНО. Возвращает фактически купленное (никогда не больше `total`)."""
+        if not self.clients or total <= 0:
             return 0
         balances = balances or {}
-        share = max(1, -(-total // len(self.clients)))  # ceil
-        tasks = [self._drain_one(c, plan_id, share, price, balances, i) for i, c in enumerate(self.clients)]
+        budget = {"n": total, "inflight": 0}  # inflight — сколько покупок сейчас летит
+        lock = asyncio.Lock()
+        tasks = [self._drain_one(c, plan_id, budget, lock, price, balances, i)
+                 for i, c in enumerate(self.clients)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, BaseException):
+                log.warning("pool worker упал: %s", r)
         return sum(r for r in results if isinstance(r, int))

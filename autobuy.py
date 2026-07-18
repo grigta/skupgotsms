@@ -210,7 +210,7 @@ class AutobuyManager:
             if i == cur:
                 continue
             a = accts[i]
-            tmp = LkClient(a["session"], a["xsrf"], self.lk._ua, self.lk.base)  # noqa: SLF001
+            tmp = LkClient(a["session"], a["xsrf"], self.lk._ua, self.lk.base, proxy=a.get("proxy"))  # noqa: SLF001
             try:
                 bal = await tmp.balance()
             except Exception:

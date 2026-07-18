@@ -43,6 +43,8 @@ class AutobuyJob:
     buy_limit: int
     last_run_at: str | None
     last_status: str | None
+    last_tick_at: str | None = None
+    last_tick_status: str | None = None
 
 
 class DB:
@@ -65,6 +67,11 @@ class DB:
                     await db.execute("UPDATE autobuy_jobs SET interval_sec = interval_min * 60")
             if "buy_limit" not in cols:
                 await db.execute("ALTER TABLE autobuy_jobs ADD COLUMN buy_limit INTEGER NOT NULL DEFAULT 0")
+            # пульс охотника: без него задание с нулём покупок неотличимо от мёртвого
+            if "last_tick_at" not in cols:
+                await db.execute("ALTER TABLE autobuy_jobs ADD COLUMN last_tick_at TEXT")
+            if "last_tick_status" not in cols:
+                await db.execute("ALTER TABLE autobuy_jobs ADD COLUMN last_tick_status TEXT")
             await db.commit()
 
     async def add_job(self, plan_id: str, service_id: str, service_name: str, plan_label: str, interval_sec: int, buy_limit: int = 0) -> int:
@@ -82,7 +89,9 @@ class DB:
             await db.commit()
 
     async def list_jobs(self, only_enabled: bool = False) -> list[AutobuyJob]:
-        q = "SELECT id, plan_id, service_id, service_name, plan_label, interval_sec, enabled, bought_count, last_run_at, last_status, buy_limit FROM autobuy_jobs"
+        q = ("SELECT id, plan_id, service_id, service_name, plan_label, interval_sec, enabled, "
+             "bought_count, last_run_at, last_status, buy_limit, last_tick_at, last_tick_status "
+             "FROM autobuy_jobs")
         if only_enabled:
             q += " WHERE enabled = 1"
         q += " ORDER BY id DESC"
@@ -94,6 +103,7 @@ class DB:
                 id=r[0], plan_id=r[1], service_id=r[2], service_name=r[3], plan_label=r[4],
                 interval_sec=r[5], enabled=bool(r[6]), bought_count=r[7],
                 last_run_at=r[8], last_status=r[9], buy_limit=r[10],
+                last_tick_at=r[11], last_tick_status=r[12],
             )
             for r in rows
         ]
@@ -101,7 +111,9 @@ class DB:
     async def get_job(self, job_id: int) -> AutobuyJob | None:
         async with aiosqlite.connect(self.path) as db:
             async with db.execute(
-                "SELECT id, plan_id, service_id, service_name, plan_label, interval_sec, enabled, bought_count, last_run_at, last_status, buy_limit FROM autobuy_jobs WHERE id = ?",
+                "SELECT id, plan_id, service_id, service_name, plan_label, interval_sec, enabled, "
+                "bought_count, last_run_at, last_status, buy_limit, last_tick_at, last_tick_status "
+                "FROM autobuy_jobs WHERE id = ?",
                 (job_id,),
             ) as cur:
                 r = await cur.fetchone()
@@ -111,6 +123,7 @@ class DB:
             id=r[0], plan_id=r[1], service_id=r[2], service_name=r[3], plan_label=r[4],
             interval_sec=r[5], enabled=bool(r[6]), bought_count=r[7],
             last_run_at=r[8], last_status=r[9], buy_limit=r[10],
+            last_tick_at=r[11], last_tick_status=r[12],
         )
 
     async def set_enabled(self, job_id: int, enabled: bool) -> None:
@@ -171,6 +184,15 @@ class DB:
         accts.append({"label": label, "session": session, "xsrf": xsrf, "api_token": api_token})
         await self.lk_save_accounts(accts)
         return len(accts) - 1
+
+    async def record_tick(self, job_id: int, status: str) -> None:
+        """Пульс охотника: цикл жив и что он сейчас видит. Покупок не касается."""
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "UPDATE autobuy_jobs SET last_tick_at = datetime('now'), last_tick_status = ? WHERE id = ?",
+                (status, job_id),
+            )
+            await db.commit()
 
     async def record_run(self, job_id: int, bought: int, status: str) -> None:
         async with aiosqlite.connect(self.path) as db:

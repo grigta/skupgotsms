@@ -9,7 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from db import DB, AutobuyJob
 from gotsms_api import GotSmsClient, GotSmsError, NoNumbersAvailable, InsufficientFunds
-from gotsms_lk import LkClient, LkAuthError, LkError
+from gotsms_lk import MAX_PER_RENT, LkClient, LkAuthError, LkError
 
 log = logging.getLogger("autobuy")
 
@@ -21,6 +21,10 @@ BATCH_LADDER = [25, 10, 1]
 # Раз в BLIND_EVERY секунд hunter пробует rent даже если probe показал «пусто» —
 # страховка от заниженного area-code count (probe врёт для части сервисов).
 BLIND_EVERY = 30.0
+
+# Как часто охотник отмечается «жив» в БД (карточка задания показывает это в
+# «Последний тик»). Реже — чтобы не долбить SQLite на интервале в 1-2 секунды.
+BEAT_EVERY = 30.0
 
 # Notify callback: (text) -> awaitable. Set by main.
 NotifyFn = Callable[[str], Awaitable[None]]
@@ -35,13 +39,28 @@ class AutobuyManager:
         self.scheduler = AsyncIOScheduler()
         self._lock = asyncio.Lock()
         self._tasks: dict[int, asyncio.Task] = {}  # hunter-циклы по job_id (LK-режим)
+        self._beats: dict[int, float] = {}  # когда последний раз отметились «живы»
 
     def start(self) -> None:
         self.scheduler.start()
+        # БЕЗ next_run_time=None: в APScheduler это способ добавить задачу
+        # ПРИОСТАНОВЛЕННОЙ, из-за чего watchdog не запускался ни разу и умершие
+        # охотники никто не поднимал.
         self.scheduler.add_job(
             self._watchdog, "interval", seconds=120, id="hunt_watchdog",
-            next_run_time=None, max_instances=1, coalesce=True,
+            max_instances=1, coalesce=True, replace_existing=True,
         )
+
+    async def _beat(self, job_id: int, now: float, status: str) -> None:
+        """Отметить, что охотник жив (не покупка). Иначе задание с нулём покупок
+        неотличимо от задания, чей цикл давно умер."""
+        if now - self._beats.get(job_id, -1e9) < BEAT_EVERY:
+            return
+        self._beats[job_id] = now
+        try:
+            await self.db.record_tick(job_id, status)
+        except Exception as e:  # пульс не должен ронять охоту
+            log.warning("beat job=%s: %s", job_id, e)
 
     async def _watchdog(self) -> None:
         """Перезапустить охотников для включённых заданий, чьи задачи умерли."""
@@ -103,6 +122,13 @@ class AutobuyManager:
         if self.lk:
             self._start_loop(job.id)
         else:
+            # Молчаливая деградация — худший вариант: задание горит «включено», а
+            # быстрого выкупа нет и пользователь об этом не знает. Говорим вслух.
+            log.warning("job=%s запущен БЕЗ ЛК — медленный режим (добавь аккаунт через /lk)", job.id)
+            asyncio.create_task(self.notify(
+                f"⚠️ Автобай <b>{job.service_name}</b> работает в медленном режиме: "
+                f"нет ЛК-аккаунта. Добавь его через /lk — иначе быстрый выкуп недоступен."
+            ))
             self._schedule(job)
             asyncio.create_task(self._tick(job.id))
 
@@ -222,7 +248,7 @@ class AutobuyManager:
 
                 # дешёвая проверка наличия через ЛК (openModal ~0.8с, не лимит)
                 try:
-                    modal, avail = await self.lk.probe(job.plan_id)
+                    modal, avail, maxq = await self.lk.probe(job.plan_id)
                 except LkAuthError:
                     await self.db.set_enabled(job.id, False)
                     self._tasks.pop(job_id, None)
@@ -239,15 +265,21 @@ class AutobuyManager:
                 # вслепую (probe бывает врёт — area-code count занижен).
                 attempt = (modal is not None) and (avail > 0 or (now2 - last_blind) >= BLIND_EVERY)
                 if not attempt:
+                    await self._beat(job_id, now2, "пул пуст" if modal is not None else "модалка не отдалась")
                     await asyncio.sleep(pause)
                     continue
                 if avail <= 0:
                     last_blind = now2  # засекаем слепую попытку
 
-                # количество шлём щедрое — rent сам возьмёт сколько реально есть в пуле
-                room = (job.buy_limit - job.bought_count) if job.buy_limit else 25
-                n = min(25, int(balance // price), room)
+                # Количество зажимаем в maxQuantity: это потолок сервера на один
+                # rent, и заказ сверх него отвергается целиком (avail по area-кодам
+                # бывает в сотнях, а взять за раз можно 1). Раньше этого не было —
+                # бот бесконечно просил 25 и получал отказ при полном пуле.
+                cap = maxq if maxq > 0 else MAX_PER_RENT
+                room = (job.buy_limit - job.bought_count) if job.buy_limit else cap
+                n = min(cap, MAX_PER_RENT, int(balance // price), room)
                 if n <= 0:
+                    await self._beat(job_id, now2, "нет места/баланса")
                     await asyncio.sleep(pause)
                     continue
                 try:
@@ -260,14 +292,16 @@ class AutobuyManager:
                 if cnt > 0:
                     balance -= price * cnt
                     await self.db.record_run(job.id, cnt, "ok")
-                    log.info("hunt job=%s bought=%d (probe avail=%d, blind=%s)",
-                             job_id, cnt, avail, avail <= 0)
+                    log.info("hunt job=%s bought=%d (probe avail=%d, maxq=%d, blind=%s)",
+                             job_id, cnt, avail, maxq, avail <= 0)
                     await self.notify(f"✅ Куплено {cnt} ({job.service_name}). Остаток: {balance:.2f}")
                     last_blind = -1e9  # был сток — гонимся пачками без слепой паузы
                     continue
                 else:
                     if avail > 0:
-                        log.info("hunt job=%s probe avail=%d, но rent=0/%s", job_id, avail, st)
+                        log.info("hunt job=%s probe avail=%d maxq=%d, просили %d, но rent=0/%s | сервер: %s",
+                                 job_id, avail, maxq, n, st, getattr(self.lk, "last_rent_detail", ""))
+                    await self._beat(job_id, now2, f"отказ: {st}")
                     await asyncio.sleep(1)
         except asyncio.CancelledError:
             return

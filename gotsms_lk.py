@@ -45,6 +45,8 @@ class LkClient:
         self._csrf: str | None = None
         self._uri: str | None = None
         self._modal_snapshot: str | None = None  # raw JSON-строка snapshot `livewire-ui-modal`
+        self._last_area_code: str = ""  # код региона из последнего probe (для rent)
+        self.last_rent_detail: str = ""  # что ответил сервер на последний неудачный rent
 
     async def aclose(self) -> None:
         await self._cli.aclose()
@@ -175,10 +177,39 @@ class LkClient:
         walk(data.get("availableAreaCodes"))
         return total
 
-    async def probe(self, plan_id: str) -> tuple[str | None, int]:
+    @staticmethod
+    def _unwrap(val):
+        """Livewire упаковывает коллекции как [значение, {"s": "arr"}] — достаём значение."""
+        if isinstance(val, list) and len(val) == 2 and isinstance(val[1], dict) and "s" in val[1]:
+            return val[0]
+        return val
+
+    def _pick_area_code(self, data: dict) -> str:
+        """Код региона с наибольшим наличием. "" — если план не требует кода
+        или кодов нет (сервер сам выберет номер)."""
+        codes = self._unwrap(data.get("availableAreaCodes"))
+        if not isinstance(codes, list) or not codes:
+            return ""
+        best, best_cnt = "", -1
+        for item in codes:
+            if not isinstance(item, dict):
+                continue
+            code = item.get("area_code") or item.get("areaCode") or item.get("code") or item.get("value")
+            cnt = item.get("count")
+            cnt = cnt if isinstance(cnt, int) else 0
+            if code and cnt > best_cnt:
+                best, best_cnt = str(code), cnt
+        return best
+
+    async def probe(self, plan_id: str) -> tuple[str | None, int, int]:
         """Дёшево (~0.8с, openModal) узнать наличие номеров плана.
-        Возвращает (snapshot модалки, кол-во доступных). Пустой пул → (snapshot, 0).
-        Snapshot можно сразу передать в `rent` для немедленного выкупа."""
+        Возвращает (snapshot модалки, доступно, maxQuantity). Пустой пул → (snapshot, 0, maxq).
+        Snapshot можно сразу передать в `rent` для немедленного выкупа.
+
+        ВАЖНО: snapshot хоста НЕ перезаписываем ответом. В ответе хост уже
+        с открытой модалкой в стеке, и следующий openModal поверх неё Livewire
+        считает «без изменений» — html пустой, модалка не находится. Держим
+        снапшот из bootstrap неизменным: каждый probe стартует с чистого хоста."""
         if not self._modal_snapshot:
             await self.bootstrap()
         try:
@@ -194,15 +225,11 @@ class LkClient:
         if not components:
             self._modal_snapshot = None
             raise LkError("probe: пустой components в ответе")
-        # Обновляем snapshot хоста из ответа — Livewire v3 меняет checksum на каждый запрос
-        updated_snap = components[0].get("snapshot")
-        if updated_snap:
-            self._modal_snapshot = updated_snap
         eff_html = (components[0].get("effects") or {}).get("html") or ""
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:
             self._modal_snapshot = None  # пустой ответ — snapshot устарел, форс-ребутстрап
-            return None, 0
+            return None, 0, 0
         modal_raw, modal_s = modal
         data = modal_s["data"]
         counts = self._available_count(data)
@@ -210,25 +237,50 @@ class LkClient:
         # area-code count бывает занижен/нулевой (напр. Bank of America), хотя
         # номер реально доступен — подстраховываемся maxQuantity (>1 = есть сток).
         avail = counts if counts > 0 else (maxq if maxq > 1 else 0)
-        return modal_raw, avail
+        self._last_area_code = self._pick_area_code(data)
+        return modal_raw, avail, maxq
 
-    async def rent(self, modal_raw: str, qty: int) -> tuple[int, str]:
-        """Выкуп по уже полученному snapshot модалки (из probe)."""
+    async def rent(self, modal_raw: str, qty: int, area_code: str | None = None) -> tuple[int, str]:
+        """Выкуп по уже полученному snapshot модалки (из probe).
+
+        `area_code` — код региона из probe. Пустой = «любой»; сервер принимает
+        пустую строку только если план не требует выбора кода."""
         qty = max(1, min(qty, MAX_PER_RENT))
+        code = self._last_area_code if area_code is None else area_code
         buy_resp = await self._post([{
             "snapshot": modal_raw,
-            "updates": {"selectedAreaCode": "", "quantity": qty},
+            "updates": {"selectedAreaCode": code or "", "quantity": qty},
             "calls": [{"path": "", "method": "rent", "params": []}],
         }])
-        return self._parse_rent(buy_resp, qty)
+        cnt, status = self._parse_rent(buy_resp, qty)
+        if cnt <= 0:
+            # Сохраняем, что именно ответил сервер — иначе отказ неотличим от отказа.
+            self.last_rent_detail = self._explain(buy_resp)
+            log.info("rent qty=%d code=%r -> %s | сервер: %s", qty, code, status, self.last_rent_detail)
+        return cnt, status
+
+    @staticmethod
+    def _explain(resp: dict) -> str:
+        """Человеческая выжимка из Livewire-ответа: тексты уведомлений/ошибок."""
+        txt = json.dumps(resp, ensure_ascii=False)
+        bits: list[str] = []
+        for pat in (r'"notify"[^]]{0,200}', r'"message"\s*:\s*"([^"]{0,200})"',
+                    r'"error[s]?"\s*:\s*("[^"]{0,200}"|\{[^}]{0,200}\})'):
+            for m in re.findall(pat, txt):
+                s = m if isinstance(m, str) else str(m)
+                if s and s not in bits:
+                    bits.append(s[:200])
+        return " | ".join(bits[:4]) if bits else txt[:300]
 
     async def buy(self, plan_id: str, quantity: int) -> tuple[int, str]:
-        """Купить до `quantity` (≤25) номеров. Сначала probe (0.8с): если пул
-        пуст — мгновенно no_numbers (не висим 21с на пустом rent)."""
-        modal_raw, available = await self.probe(plan_id)
+        """Купить до `quantity` номеров. Сначала probe (0.8с): если пул
+        пуст — мгновенно no_numbers (не висим 21с на пустом rent).
+        Количество зажимается в maxQuantity — заказ сверх потолка сервер отвергает."""
+        modal_raw, available, maxq = await self.probe(plan_id)
         if not modal_raw or available <= 0:
             return 0, "no_numbers"
-        return await self.rent(modal_raw, min(quantity, available, MAX_PER_RENT))
+        cap = maxq if maxq > 0 else MAX_PER_RENT
+        return await self.rent(modal_raw, min(quantity, available, cap, MAX_PER_RENT))
 
     @staticmethod
     def _parse_rent(resp: dict, qty_requested: int = 0) -> tuple[int, str]:

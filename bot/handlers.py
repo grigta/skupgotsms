@@ -1020,6 +1020,7 @@ def _job_text(job) -> str:
         f"Интервал: {job.interval_sec} сек\n"
         f"Лимит: {job.buy_limit if job.buy_limit else '∞'}\n"
         f"Куплено всего: {job.bought_count}\n"
-        f"Последний запуск: {job.last_run_at or '—'} ({job.last_status or '—'})\n"
+        f"Последняя покупка: {job.last_run_at or '—'} ({job.last_status or '—'})\n"
+        f"Охотник жив: {job.last_tick_at or '—'} ({job.last_tick_status or '—'})\n"
         f"Статус: {flag}"
     )

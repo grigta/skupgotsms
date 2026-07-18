@@ -26,6 +26,13 @@ BLIND_EVERY = 30.0
 # «Последний тик»). Реже — чтобы не долбить SQLite на интервале в 1-2 секунды.
 BEAT_EVERY = 30.0
 
+# Конвейер проб: сколько дорожек и с каким сдвигом. Одна дорожка = прежнее
+# поведение. Больше дорожек = раньше детект, но во столько же раз больше
+# запросов к gotsms (перед ним Cloudflare — не задирать без нужды).
+# Переопределяется настройкой probe_lanes в БД.
+PROBE_LANES = 3
+PROBE_STAGGER = 0.4
+
 # Notify callback: (text) -> awaitable. Set by main.
 NotifyFn = Callable[[str], Awaitable[None]]
 
@@ -94,6 +101,55 @@ class AutobuyManager:
         log.info("ЛК-пул собран: %d аккаунтов (%s)", len(clients),
                  ", ".join(str(a.get("label")) for a in accts))
         return self._pool
+
+    async def _probe_lanes(self) -> int:
+        """Сколько дорожек конвейера. Настройка probe_lanes в БД (1 = выключить)."""
+        raw = await self.db.get_setting("probe_lanes")
+        try:
+            return max(1, min(int(raw), 8)) if raw else PROBE_LANES
+        except (TypeError, ValueError):
+            return PROBE_LANES
+
+    async def _probe_burst(self, plan_id: str, lanes: int, stagger: float):
+        """Конвейер: `lanes` проб со сдвигом `stagger`, вместо одной по очереди.
+
+        Смысл — не пропускная способность, а РАННИЙ детект. Одиночная проба
+        видит завоз в среднем через cadence/2 (~0.65с при такте 1.3с); дорожки
+        со сдвигом 0.4с сокращают это до ~0.2с. За эти доли секунды и идёт
+        гонка с другими ботами за небольшой пул.
+
+        Возвращает первую пробу, увидевшую сток; иначе — любую с модалкой."""
+        if lanes <= 1:
+            return await self.lk.probe(plan_id)
+
+        async def lane(i: int):
+            if i:
+                await asyncio.sleep(i * stagger)
+            return await self.lk.probe(plan_id)
+
+        tasks = [asyncio.create_task(lane(i)) for i in range(lanes)]
+        best = (None, 0, 0, "")
+        errs: list[Exception] = []
+        try:
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    res = await fut
+                except (LkAuthError, LkError) as e:
+                    errs.append(e)
+                    continue
+                if res[0] is not None and res[1] > 0:
+                    return res  # сток найден — остальные дорожки не нужны
+                if best[0] is None and res[0] is not None:
+                    best = res
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            # даём отменённым задачам свернуться, чтобы не сыпать warning'ами
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if best[0] is None and errs:
+            raise errs[0]  # все дорожки упали — наружу как обычная ошибка probe
+        return best
 
     @staticmethod
     async def _nap(loop, cycle_start: float, interval_sec: int) -> None:
@@ -255,6 +311,7 @@ class AutobuyManager:
         balance = 0.0
         last_meta = -1e9
         last_blind = -1e9  # когда последний раз пробовали rent «вслепую»
+        lanes = PROBE_LANES  # обновляется вместе с price/balance
         try:
             while True:
                 cycle_start = loop.time()  # такт считаем ОТ начала, не поверх probe
@@ -278,6 +335,7 @@ class AutobuyManager:
                         t = next((p for p in plans if p.id == job.plan_id), None)
                         price = t.price if t else 0.0
                         last_meta = now
+                        lanes = await self._probe_lanes()
                     except GotSmsError as e:
                         if getattr(e, "status", 0) in (401, 403):
                             await self.db.set_enabled(job.id, False)
@@ -299,9 +357,10 @@ class AutobuyManager:
                     await self._nap(loop, cycle_start, job.interval_sec)
                     continue
 
-                # дешёвая проверка наличия через ЛК (openModal ~0.8с, не лимит)
+                # дешёвая проверка наличия через ЛК (openModal ~1.3с, не лимит),
+                # конвейером в несколько дорожек — чтобы заметить завоз раньше
                 try:
-                    modal, avail, maxq = await self.lk.probe(job.plan_id)
+                    modal, avail, maxq, code = await self._probe_burst(job.plan_id, lanes, PROBE_STAGGER)
                 except LkAuthError:
                     await self.db.set_enabled(job.id, False)
                     self._tasks.pop(job_id, None)
@@ -336,7 +395,7 @@ class AutobuyManager:
                     await self._nap(loop, cycle_start, job.interval_sec)
                     continue
                 try:
-                    cnt, st = await self.lk.rent(modal, n)
+                    cnt, st = await self.lk.rent(modal, n, code)
                 except (LkAuthError, LkError) as e:
                     log.warning("hunt rent job=%s: %s", job_id, e)
                     await self._nap(loop, cycle_start, job.interval_sec)

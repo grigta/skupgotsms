@@ -367,7 +367,7 @@ class LkPool:
                 continue
             try:
                 cnt, st = await cli.buy(plan_id, take)
-            except (LkAuthError, LkError) as e:
+            except Exception as e:
                 log.warning("pool acct#%d: %s", idx, e)
                 async with lock:
                     budget["n"] += take  # не смогли — возвращаем долю в общий котёл

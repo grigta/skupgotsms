@@ -416,6 +416,8 @@ class AutobuyManager:
                                 log.warning("pool buy_bulk job=%s: %s", job_id, e)
                     total = cnt + extra
                     balance -= price * extra  # пул потратил деньги — учитываем в локальном балансе
+                    if extra > 0:
+                        last_meta = -1e9  # пул включает все аккаунты, часть extra куплена не с self.lk — форс refetch баланса
                     await self.db.record_run(job.id, total, "ok")
                     log.info("hunt job=%s bought=%d (свой=%d, пул=%d, avail=%d, maxq=%d, blind=%s)",
                              job_id, total, cnt, extra, avail, maxq, avail <= 0)

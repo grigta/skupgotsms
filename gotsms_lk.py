@@ -156,8 +156,8 @@ class LkClient:
             })
         except httpx.HTTPError as e:  # timeout/connect/522-read и т.п. — не роняем цикл
             raise LkError(f"network: {type(e).__name__}") from e
-        if r.status_code == 419:  # CSRF/сессия истекла
-            raise LkAuthError("419 — сессия истекла")
+        if r.status_code == 419:  # CSRF протух — форс-ребутстрап; если сессия мертва,
+            raise LkError("419 CSRF expired")  # bootstrap поймает редирект на /login → LkAuthError
         if r.status_code == 401 or r.status_code == 403:
             raise LkAuthError(f"{r.status_code} — не авторизован")
         if r.status_code != 200:

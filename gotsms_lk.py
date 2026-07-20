@@ -156,8 +156,10 @@ class LkClient:
             })
         except httpx.HTTPError as e:  # timeout/connect/522-read и т.п. — не роняем цикл
             raise LkError(f"network: {type(e).__name__}") from e
-        if r.status_code == 419:  # CSRF протух — форс-ребутстрап; если сессия мертва,
-            raise LkError("419 CSRF expired")  # bootstrap поймает редирект на /login → LkAuthError
+        if r.status_code == 419:  # CSRF протух — нужен ребутстрап, сессия может быть жива
+            self._csrf = None          # форс bootstrap при следующем _post()
+            self._modal_snapshot = None
+            raise LkError("419 CSRF expired")
         if r.status_code == 401 or r.status_code == 403:
             raise LkAuthError(f"{r.status_code} — не авторизован")
         if r.status_code != 200:

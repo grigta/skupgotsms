@@ -164,7 +164,10 @@ class LkClient:
             raise LkAuthError(f"{r.status_code} — не авторизован")
         if r.status_code != 200:
             raise LkError(f"livewire {r.status_code}: {r.text[:200]}")
-        return r.json()
+        try:
+            return r.json()
+        except Exception as e:
+            raise LkError(f"bad JSON in Livewire response: {r.text[:200]}") from e
 
     # ───────── bulk buy ─────────
     @staticmethod

@@ -451,7 +451,7 @@ class AutobuyManager:
             await asyncio.sleep(3)
             if job_id not in self._tasks:  # watchdog уже перезапустил — не дублируем
                 job = await self.db.get_job(job_id)
-                if job and job.enabled:
+                if job and job.enabled and job_id not in self._tasks:  # повторная проверка после await
                     self._tasks[job_id] = asyncio.create_task(self._hunt_loop(job_id))
 
     async def _buy_one(self, plan_id: str) -> tuple[str, object | None]:

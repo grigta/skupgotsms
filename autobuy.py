@@ -395,7 +395,14 @@ class AutobuyManager:
                     continue
                 try:
                     cnt, st = await self.lk.rent(modal, n, code)
-                except (LkAuthError, LkError) as e:
+                except LkAuthError:
+                    await self.db.set_enabled(job.id, False)
+                    self._tasks.pop(job_id, None)
+                    await self.notify(
+                        f"⛔ Автобай <b>{job.service_name}</b>: ЛК-сессия протухла (rent) — обнови через /lk"
+                    )
+                    return
+                except LkError as e:
                     log.warning("hunt rent job=%s: %s", job_id, e)
                     await self._nap(loop, cycle_start, job.interval_sec)
                     continue

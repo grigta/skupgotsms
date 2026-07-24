@@ -128,7 +128,7 @@ class AutobuyManager:
             return await self.lk.probe(plan_id)
 
         tasks = [asyncio.create_task(lane(i)) for i in range(lanes)]
-        best = (None, 0, 0, "")
+        best = (None, 0, 0, "", 0.0)
         errs: list[Exception] = []
         try:
             for fut in asyncio.as_completed(tasks):
@@ -159,6 +159,23 @@ class AutobuyManager:
         left = min(max(interval_sec, 0), 5) - (loop.time() - cycle_start)
         if left > 0:
             await asyncio.sleep(left)
+
+    async def _hunt_balance(self) -> float | None:
+        """Баланс активного аккаунта. Сначала через ЛК-куку (Livewire) — она жива
+        даже когда API-токен протух; иначе fallback на публичный API. Это снимает
+        зависимость автобая от API-токена, который постоянно дохнет."""
+        if self.lk:
+            try:
+                b = await self.lk.balance()
+                if b is not None:
+                    return b
+            except Exception as e:
+                log.warning("hunt balance via LK: %s", e)
+        try:
+            return await self.api.balance()
+        except GotSmsError as e:
+            log.warning("hunt balance via API: %s", e)
+            return None
 
     async def _beat(self, job_id: int, now: float, status: str) -> None:
         """Отметить, что охотник жив (не покупка). Иначе задание с нулём покупок
@@ -325,41 +342,23 @@ class AutobuyManager:
                     )
                     return
 
-                # price + balance из API не чаще раза в 25с (бережём лимит 30/мин)
+                # Баланс — через ЛК-куку раз в 25с. НЕ через API-токен: он
+                # постоянно дохнет и раньше 401 молча выключал задание. Кука
+                # живёт, пока аккаунт активен в /lk.
                 now = loop.time()
-                if price <= 0 or now - last_meta > 25:
-                    try:
-                        balance = await self.api.balance()
-                        plans = await self.api.plans_all(service_id=job.service_id, per_page=100, use_cache=True)
-                        t = next((p for p in plans if p.id == job.plan_id), None)
-                        price = t.price if t else 0.0
-                        last_meta = now
-                        lanes = await self._probe_lanes()
-                    except GotSmsError as e:
-                        if getattr(e, "status", 0) in (401, 403):
-                            await self.db.set_enabled(job.id, False)
-                            self._tasks.pop(job_id, None)
-                            await self.notify(f"⛔ Автобай <b>{job.service_name}</b> остановлен (auth error)")
-                            return
-                        await self._nap(loop, cycle_start, job.interval_sec)
-                        continue
+                if now - last_meta > 25:
+                    b = await self._hunt_balance()
+                    if b is not None:
+                        balance = b
+                    last_meta = now
+                    lanes = await self._probe_lanes()
 
-                if price <= 0:
-                    await self._nap(loop, cycle_start, job.interval_sec)
-                    continue
-                if balance < price:
-                    # активный аккаунт пуст — пробуем автопереключение на другой
-                    if await self._autoswitch():
-                        price = 0.0
-                        last_meta = -1e9  # форс refetch баланса/цены нового аккаунта
-                        continue
-                    await self._nap(loop, cycle_start, job.interval_sec)
-                    continue
-
-                # дешёвая проверка наличия через ЛК (openModal ~1.3с, не лимит),
-                # конвейером в несколько дорожек — чтобы заметить завоз раньше
+                # probe (openModal ~1.3с, не лимит) даёт И наличие, И цену — цена
+                # есть в модалке даже при пустом пуле, поэтому API-токен не нужен.
+                # Конвейер в несколько дорожек — чтобы заметить завоз раньше.
                 try:
-                    modal, avail, maxq, code = await self._probe_burst(job.plan_id, lanes, PROBE_STAGGER)
+                    modal, avail, maxq, code, mprice = await self._probe_burst(
+                        job.plan_id, lanes, PROBE_STAGGER)
                 except LkAuthError:
                     await self.db.set_enabled(job.id, False)
                     self._tasks.pop(job_id, None)
@@ -368,6 +367,21 @@ class AutobuyManager:
                     )
                     return
                 except LkError:
+                    await self._nap(loop, cycle_start, job.interval_sec)
+                    continue
+
+                if mprice > 0:
+                    price = mprice  # свежая цена из модалки, без API
+                if price <= 0:
+                    await self._beat(job_id, loop.time(), "нет цены")
+                    await self._nap(loop, cycle_start, job.interval_sec)
+                    continue
+                if balance < price:
+                    # активный аккаунт пуст — пробуем автопереключение на другой
+                    if await self._autoswitch():
+                        last_meta = -1e9  # форс refetch баланса нового аккаунта
+                        continue
+                    await self._beat(job_id, loop.time(), "нет баланса")
                     await self._nap(loop, cycle_start, job.interval_sec)
                     continue
 

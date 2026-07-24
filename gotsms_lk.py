@@ -213,10 +213,23 @@ class LkClient:
                 best, best_cnt = str(code), cnt
         return best
 
-    async def probe(self, plan_id: str) -> tuple[str | None, int, int, str]:
+    @staticmethod
+    def _price_of(data: dict) -> float:
+        """Цена за один номер из модалки. Есть даже при пустом пуле, поэтому
+        автобаю не нужен API-токен для цены. basePrice → totalPrice → 0."""
+        for key in ("basePrice", "totalPrice"):
+            v = data.get(key)
+            try:
+                if v is not None and float(v) > 0:
+                    return float(v)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    async def probe(self, plan_id: str) -> tuple[str | None, int, int, str, float]:
         """Дёшево (~0.8с, openModal) узнать наличие номеров плана.
-        Возвращает (snapshot модалки, доступно, maxQuantity, area-код).
-        Пустой пул → (snapshot, 0, maxq, код).
+        Возвращает (snapshot модалки, доступно, maxQuantity, area-код, цена).
+        Пустой пул → (snapshot, 0, maxq, код, цена).
 
         Ничего не пишет в self — поэтому probe можно гонять в несколько
         параллельных дорожек (конвейер) без гонок за общее состояние.
@@ -245,7 +258,7 @@ class LkClient:
         modal = next(((raw, s) for (n, raw, s) in self._snapshots(eff_html) if n == MODAL), None)
         if not modal:
             self._modal_snapshot = None  # пустой ответ — snapshot устарел, форс-ребутстрап
-            return None, 0, 0, ""
+            return None, 0, 0, "", 0.0
         modal_raw, modal_s = modal
         data = modal_s["data"]
         counts = self._available_count(data)
@@ -253,7 +266,7 @@ class LkClient:
         # area-code count бывает занижен/нулевой (напр. Bank of America), хотя
         # номер реально доступен — подстраховываемся maxQuantity (>1 = есть сток).
         avail = counts if counts > 0 else (maxq if maxq > 1 else 0)
-        return modal_raw, avail, maxq, self._pick_area_code(data)
+        return modal_raw, avail, maxq, self._pick_area_code(data), self._price_of(data)
 
     async def rent(self, modal_raw: str, qty: int, area_code: str | None = None) -> tuple[int, str]:
         """Выкуп по уже полученному snapshot модалки (из probe).
@@ -291,7 +304,7 @@ class LkClient:
         """Купить до `quantity` номеров. Сначала probe (0.8с): если пул
         пуст — мгновенно no_numbers (не висим 21с на пустом rent).
         Количество зажимается в maxQuantity — заказ сверх потолка сервер отвергает."""
-        modal_raw, available, maxq, code = await self.probe(plan_id)
+        modal_raw, available, maxq, code, _price = await self.probe(plan_id)
         if not modal_raw or available <= 0:
             return 0, "no_numbers"
         cap = maxq if maxq > 0 else MAX_PER_RENT

@@ -77,8 +77,8 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         except GotSmsError as e:
             await m.answer(f"Ошибка API {e.status}: <code>{e.payload}</code>")
 
-    # ───────── My numbers (фильтр по сервису + пагинация 20/стр) ─────────
-    MN_PER_PAGE = 20
+    # ───────── My numbers (фильтр по сервису + пагинация 25/стр) ─────────
+    MN_PER_PAGE = 25
 
     def _mn_page(lines: list[str], page: int) -> tuple[list[str], int, int]:
         total = max(1, -(-len(lines) // MN_PER_PAGE))

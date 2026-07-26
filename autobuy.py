@@ -427,7 +427,11 @@ class AutobuyManager:
                     # Внутри одного аккаунта сервер сериализует покупки (lock на
                     # балансе), поэтому ускорение даёт только фан-аут по разным.
                     extra = 0
-                    pool = await self._ensure_pool()
+                    try:
+                        pool = await self._ensure_pool()
+                    except Exception as e:  # пул не должен ронять охоту (record_run должен дойти)
+                        log.warning("ensure_pool job=%s: %s", job_id, e)
+                        pool = None
                     if pool is not None:
                         left = (job.buy_limit - job.bought_count - cnt) if job.buy_limit else MAX_PER_RENT
                         if left > 0:

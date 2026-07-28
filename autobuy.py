@@ -423,13 +423,18 @@ class AutobuyManager:
 
                 if cnt > 0:
                     balance -= price * cnt
+                    # Записываем купленное ДО await-операций пула: CancelledError
+                    # (BaseException, не Exception) не ловится guard'ами ниже и
+                    # улетает в except CancelledError: return — если record_run
+                    # стоял после пула, покупки уходили без учёта в bought_count.
+                    await self.db.record_run(job.id, cnt, "ok")
                     # Сток есть — добираем остаток ПАРАЛЛЕЛЬНО остальными аккаунтами.
                     # Внутри одного аккаунта сервер сериализует покупки (lock на
                     # балансе), поэтому ускорение даёт только фан-аут по разным.
                     extra = 0
                     try:
                         pool = await self._ensure_pool()
-                    except Exception as e:  # пул не должен ронять охоту (record_run должен дойти)
+                    except Exception as e:
                         log.warning("ensure_pool job=%s: %s", job_id, e)
                         pool = None
                     if pool is not None:
@@ -437,13 +442,13 @@ class AutobuyManager:
                         if left > 0:
                             try:
                                 extra = await pool.buy_bulk(job.plan_id, left, price)
-                            except Exception as e:  # пул не должен ронять охоту
+                            except Exception as e:
                                 log.warning("pool buy_bulk job=%s: %s", job_id, e)
-                    total = cnt + extra
-                    balance -= price * extra  # пул потратил деньги — учитываем в локальном балансе
                     if extra > 0:
+                        balance -= price * extra  # пул потратил деньги — учитываем в локальном балансе
                         last_meta = -1e9  # пул включает все аккаунты, часть extra куплена не с self.lk — форс refetch баланса
-                    await self.db.record_run(job.id, total, "ok")
+                        await self.db.record_run(job.id, extra, "ok")
+                    total = cnt + extra
                     log.info("hunt job=%s bought=%d (свой=%d, пул=%d, avail=%d, maxq=%d, blind=%s)",
                              job_id, total, cnt, extra, avail, maxq, avail <= 0)
                     tail = f" (+{extra} пулом)" if extra else ""

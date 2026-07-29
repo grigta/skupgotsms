@@ -148,7 +148,8 @@ class AutobuyManager:
             # даём отменённым задачам свернуться, чтобы не сыпать warning'ами
             await asyncio.gather(*tasks, return_exceptions=True)
         if best[0] is None and errs:
-            raise errs[0]  # все дорожки упали — наружу как обычная ошибка probe
+            auth_err = next((e for e in errs if isinstance(e, LkAuthError)), None)
+            raise (auth_err if auth_err else errs[0])
         return best
 
     @staticmethod

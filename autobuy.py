@@ -428,7 +428,10 @@ class AutobuyManager:
                     # (BaseException, не Exception) не ловится guard'ами ниже и
                     # улетает в except CancelledError: return — если record_run
                     # стоял после пула, покупки уходили без учёта в bought_count.
-                    await self.db.record_run(job.id, cnt, "ok")
+                    try:
+                        await self.db.record_run(job.id, cnt, "ok")
+                    except Exception as db_err:
+                        log.warning("hunt record_run job=%s cnt=%d: %s", job_id, cnt, db_err)
                     # Сток есть — добираем остаток ПАРАЛЛЕЛЬНО остальными аккаунтами.
                     # Внутри одного аккаунта сервер сериализует покупки (lock на
                     # балансе), поэтому ускорение даёт только фан-аут по разным.
@@ -448,7 +451,10 @@ class AutobuyManager:
                     if extra > 0:
                         balance -= price * extra  # пул потратил деньги — учитываем в локальном балансе
                         last_meta = -1e9  # пул включает все аккаунты, часть extra куплена не с self.lk — форс refetch баланса
-                        await self.db.record_run(job.id, extra, "ok")
+                        try:
+                            await self.db.record_run(job.id, extra, "ok")
+                        except Exception as db_err:
+                            log.warning("hunt record_run job=%s extra=%d: %s", job_id, extra, db_err)
                     total = cnt + extra
                     log.info("hunt job=%s bought=%d (свой=%d, пул=%d, avail=%d, maxq=%d, blind=%s)",
                              job_id, total, cnt, extra, avail, maxq, avail <= 0)

@@ -211,9 +211,11 @@ class AutobuyManager:
             self._stop_job(job.id)
             self._start_job(job)
 
-    async def _autoswitch(self) -> bool:
+    async def _autoswitch(self, price: float = 0.0) -> bool:
         """Если включено автопереключение и активный аккаунт пуст — перейти на
-        следующий аккаунт с балансом (cookie + API-токен). True если переключились."""
+        следующий аккаунт с балансом (cookie + API-токен). True если переключились.
+        price > 0: переключаемся только на аккаунт, где баланс >= price, иначе
+        охотник зациклится между аккаунтами с ненулевым, но недостаточным балансом."""
         if (await self.db.get_setting("lk_autoswitch")) != "1":
             return False
         if not self.lk:
@@ -235,7 +237,7 @@ class AutobuyManager:
                 bal = None
             finally:
                 await tmp.aclose()
-            if bal and bal > 0:
+            if bal and bal >= max(price, 0):
                 await self.db.lk_set_active(i)
                 await self.lk.update_cookies(a["session"], a["xsrf"])
                 if a.get("api_token"):
@@ -379,7 +381,7 @@ class AutobuyManager:
                     continue
                 if balance < price:
                     # активный аккаунт пуст — пробуем автопереключение на другой
-                    if await self._autoswitch():
+                    if await self._autoswitch(price):
                         last_meta = -1e9  # форс refetch баланса нового аккаунта
                         continue
                     await self._beat(job_id, loop.time(), "нет баланса")

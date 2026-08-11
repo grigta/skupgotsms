@@ -136,9 +136,12 @@ class LkClient:
         m = re.search(r'window\.livewireScriptConfig\s*=\s*(\{.*?\})\s*;', doc)
         if not m:
             raise LkError("livewireScriptConfig не найден")
-        cfg = json.loads(m.group(1))
-        self._csrf = cfg["csrf"]
-        self._uri = cfg["uri"].replace(self.base, "")  # путь /livewire-XXXX/update
+        try:
+            cfg = json.loads(m.group(1))
+            self._csrf = cfg["csrf"]
+            self._uri = cfg["uri"].replace(self.base, "")  # путь /livewire-XXXX/update
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            raise LkError(f"livewireScriptConfig parse: {e}") from e
         host = next(((raw, s) for (n, raw, s) in self._snapshots(doc) if n == "livewire-ui-modal"), None)
         if not host:
             raise LkError("snapshot livewire-ui-modal не найден")

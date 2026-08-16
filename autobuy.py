@@ -130,6 +130,7 @@ class AutobuyManager:
         tasks = [asyncio.create_task(lane(i)) for i in range(lanes)]
         best = (None, 0, 0, "", 0.0)
         errs: list[Exception] = []
+        any_ok = False  # хотя бы одна дорожка вернула ответ без исключения
         try:
             for fut in asyncio.as_completed(tasks):
                 try:
@@ -137,6 +138,7 @@ class AutobuyManager:
                 except (LkAuthError, LkError) as e:
                     errs.append(e)
                     continue
+                any_ok = True
                 if res[0] is not None and res[1] > 0:
                     return res  # сток найден — остальные дорожки не нужны
                 if best[0] is None and res[0] is not None:
@@ -147,7 +149,10 @@ class AutobuyManager:
                     t.cancel()
             # даём отменённым задачам свернуться, чтобы не сыпать warning'ами
             await asyncio.gather(*tasks, return_exceptions=True)
-        if best[0] is None and errs:
+        # Бросаем ошибку только если ВСЕ дорожки упали: если хоть одна вернула
+        # ответ без исключения — сессия жива и ложный LkAuthError недопустим
+        # (он остановит охоту и выключит задание, хотя протухания не было).
+        if not any_ok and errs:
             auth_err = next((e for e in errs if isinstance(e, LkAuthError)), None)
             raise (auth_err if auth_err else errs[0])
         return best

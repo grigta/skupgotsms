@@ -435,8 +435,10 @@ class AutobuyManager:
                     # (BaseException, не Exception) не ловится guard'ами ниже и
                     # улетает в except CancelledError: return — если record_run
                     # стоял после пула, покупки уходили без учёта в bought_count.
+                    # shield: task.cancel() может прийти именно в этот await
+                    # (aiosqlite — реальные yields); без shield bought_count занизится.
                     try:
-                        await self.db.record_run(job.id, cnt, "ok")
+                        await asyncio.shield(self.db.record_run(job.id, cnt, "ok"))
                     except Exception as db_err:
                         log.warning("hunt record_run job=%s cnt=%d: %s", job_id, cnt, db_err)
                     # Сток есть — добираем остаток ПАРАЛЛЕЛЬНО остальными аккаунтами.

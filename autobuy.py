@@ -459,7 +459,11 @@ class AutobuyManager:
                         balance -= price * extra  # пул потратил деньги — учитываем в локальном балансе
                         last_meta = -1e9  # пул включает все аккаунты, часть extra куплена не с self.lk — форс refetch баланса
                         try:
-                            await self.db.record_run(job.id, extra, "ok")
+                            # shield: если задание выключают (task.cancel) в этот момент,
+                            # CancelledError будет доставлен сюда — без shield record_run
+                            # не запустится и bought_count занизится (ср. комментарий выше
+                            # про record_run(cnt), который вынесен ДО await-операций пула).
+                            await asyncio.shield(self.db.record_run(job.id, extra, "ok"))
                         except Exception as db_err:
                             log.warning("hunt record_run job=%s extra=%d: %s", job_id, extra, db_err)
                     total = cnt + extra

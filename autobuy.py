@@ -244,6 +244,7 @@ class AutobuyManager:
                 await tmp.aclose()
             if bal and bal >= max(price, 0):
                 await self.db.lk_set_active(i)
+                self.lk._proxy = a.get("proxy") or None  # прокси нового аккаунта, иначе hunt падает с LkAuthError
                 await self.lk.update_cookies(a["session"], a["xsrf"])
                 if a.get("api_token"):
                     self.api.set_token(a["api_token"])

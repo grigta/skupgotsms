@@ -189,6 +189,7 @@ def build_router(api: GotSmsClient, db: DB, autobuy: AutobuyManager, allowed_use
         was_none = autobuy.lk is None
         from config import settings
         if autobuy.lk:
+            autobuy.lk._proxy = a.get("proxy") or None  # прокси нового аккаунта
             await autobuy.lk.update_cookies(a["session"], a["xsrf"])
         else:
             from gotsms_lk import LkClient

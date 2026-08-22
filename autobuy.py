@@ -454,21 +454,27 @@ class AutobuyManager:
                     if pool is not None:
                         left = (job.buy_limit - job.bought_count - cnt) if job.buy_limit else MAX_PER_RENT
                         if left > 0:
-                            try:
-                                extra = await pool.buy_bulk(job.plan_id, left, price)
-                            except Exception as e:
-                                log.warning("pool buy_bulk job=%s: %s", job_id, e)
+                            # shield всей связки buy+record: CancelledError может
+                            # прийти в любой await внутри buy_bulk — без этого
+                            # bought_count занизится, если задание выключили в этот
+                            # момент (record_run после buy_bulk не выполнился бы).
+                            _jid, _pid, _left, _pr = job.id, job.plan_id, left, price
+                            async def _pool_buy() -> int:
+                                n = 0
+                                try:
+                                    n = await pool.buy_bulk(_pid, _left, _pr)
+                                except Exception as _e:
+                                    log.warning("pool buy_bulk job=%s: %s", _jid, _e)
+                                if n > 0:
+                                    try:
+                                        await self.db.record_run(_jid, n, "ok")
+                                    except Exception as _db_e:
+                                        log.warning("hunt record_run(pool) job=%s n=%d: %s", _jid, n, _db_e)
+                                return n
+                            extra = await asyncio.shield(_pool_buy())
                     if extra > 0:
                         balance -= price * extra  # пул потратил деньги — учитываем в локальном балансе
-                        last_meta = -1e9  # пул включает все аккаунты, часть extra куплена не с self.lk — форс refetch баланса
-                        try:
-                            # shield: если задание выключают (task.cancel) в этот момент,
-                            # CancelledError будет доставлен сюда — без shield record_run
-                            # не запустится и bought_count занизится (ср. комментарий выше
-                            # про record_run(cnt), который вынесен ДО await-операций пула).
-                            await asyncio.shield(self.db.record_run(job.id, extra, "ok"))
-                        except Exception as db_err:
-                            log.warning("hunt record_run job=%s extra=%d: %s", job_id, extra, db_err)
+                        last_meta = -1e9  # пул включает все аккаунты — форс refetch баланса
                     total = cnt + extra
                     log.info("hunt job=%s bought=%d (свой=%d, пул=%d, avail=%d, maxq=%d, blind=%s)",
                              job_id, total, cnt, extra, avail, maxq, avail <= 0)
